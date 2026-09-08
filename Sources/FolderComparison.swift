@@ -308,8 +308,10 @@ enum FolderComparer {
 
 @MainActor
 final class FolderComparisonModel: ObservableObject {
+    private static let sourceModeDefaultsKey = "comparisonSourceMode"
     @Published var oldRoot: URL? = UserDefaults.standard.string(forKey: "comparisonOldRoot").map { URL(fileURLWithPath: $0) }
     @Published var newRoot: URL? = UserDefaults.standard.string(forKey: "comparisonNewRoot").map { URL(fileURLWithPath: $0) }
+    @Published var sourceMode: ComparisonSourceMode
     @Published var files: [ComparedFile] = []
     @Published var selectedID: String?
     @Published var onlyDifferences = true
@@ -323,9 +325,52 @@ final class FolderComparisonModel: ObservableObject {
     @Published var page = 0
     @Published var checkedFileIDs = Set<String>()
     @Published var comparisonZoom: CGFloat = 1.0
+    @Published private(set) var gitRepository: GitRepositoryInfo?
+    @Published private(set) var gitBranches: [GitBranch] = []
+    @Published private(set) var gitCommits: [GitCommit] = []
+    @Published var selectedGitBranchRef = ""
+    @Published var selectedGitCommitHash = ""
+    @Published var gitCommitSelectionMode: GitCommitSelectionMode = .commit
+    @Published var gitDate = Date()
+    @Published private(set) var isLoadingGitHistory = false
+    @Published private(set) var gitError: String?
     private var cancellation = ComparisonCancellation()
     private var projectionCache: [String: [String: ComparisonTableProjection]] = [:]
+    private var configuredProjectID: String?
+    private var gitRequestToken = UUID()
+    private var gitSnapshotRoot: URL?
+
+    init() {
+        sourceMode = ComparisonSourceMode(
+            rawValue: UserDefaults.standard.string(forKey: Self.sourceModeDefaultsKey) ?? ""
+        ) ?? .folders
+        status = sourceMode == .gitHistory
+            ? "选择当前项目和 Git 历史提交。"
+            : "选择历史版本和当前版本的配置表目录。"
+    }
+
     var selected: ComparedFile? { files.first { $0.id == selectedID } }
+    var selectedGitCommit: GitCommit? {
+        switch gitCommitSelectionMode {
+        case .commit:
+            return gitCommits.first { $0.hash == selectedGitCommitHash }
+        case .date:
+            return gitCommits.first { $0.date <= gitDate }
+        }
+    }
+    var canRun: Bool {
+        switch sourceMode {
+        case .folders:
+            return oldRoot != nil && newRoot != nil
+        case .gitHistory:
+            guard let gitRepository, selectedGitCommit != nil else { return false }
+            return FileManager.default.fileExists(atPath: gitRepository.currentDataRoot.path)
+        }
+    }
+    var gitDataRootDescription: String? {
+        guard let gitRepository else { return nil }
+        return gitRepository.dataRelativePath
+    }
     var visibleFiles: [ComparedFile] { files.filter { (!onlyDifferences || $0.status != .same) && (query.isEmpty || $0.relativePath.localizedCaseInsensitiveContains(query)) } }
     var visibleCells: [CellDifference] { selected?.differences.filter {
         (sheetFilter == "全部工作表" || $0.sheet == sheetFilter) && (cellQuery.isEmpty || "\($0.location) \($0.key) \($0.old ?? "") \($0.new ?? "")".localizedCaseInsensitiveContains(cellQuery))
@@ -354,34 +399,234 @@ final class FolderComparisonModel: ObservableObject {
             files = []; selectedID = nil; checkedFileIDs = []; projectionCache = [:]; status = "目录已更新，请开始对比。"
         }
     }
-    func run() {
-        guard let oldRoot, let newRoot, !isRunning else { return }
-        let align = alignKeys, token = ComparisonCancellation(); cancellation = token
-        isRunning = true; files = []; selectedID = nil; checkedFileIDs = []; projectionCache = [:]; progress = 0; status = "正在扫描文件夹…"
-        DispatchQueue.global(qos: .userInitiated).async {
+
+    private struct ComparisonRoots {
+        let old: URL
+        let new: URL
+        let temporaryRoot: URL?
+    }
+
+    func sourceModeDidChange(project: ExportProject?) {
+        UserDefaults.standard.set(sourceMode.rawValue, forKey: Self.sourceModeDefaultsKey)
+        cancellation.cancel()
+        resetComparisonResults()
+        gitRequestToken = UUID()
+        if sourceMode == .gitHistory {
+            status = "选择当前项目和 Git 历史提交。"
+            configureGitProject(project)
+        } else {
+            isLoadingGitHistory = false
+            gitError = nil
+            configuredProjectID = nil
+            if !isRunning { releaseGitSnapshot() }
+            status = "选择历史版本和当前版本的配置表目录。"
+        }
+    }
+
+    func configureGitProject(_ project: ExportProject?) {
+        guard sourceMode == .gitHistory else { return }
+        let projectID = project?.id
+        guard projectID != configuredProjectID || gitRepository == nil else { return }
+        configuredProjectID = projectID
+        resetComparisonResults()
+        if !isRunning { releaseGitSnapshot() }
+        gitRepository = nil
+        gitBranches = []
+        gitCommits = []
+        selectedGitBranchRef = ""
+        selectedGitCommitHash = ""
+        gitError = nil
+        guard let project else {
+            gitError = "请先在顶部选择项目。"
+            status = gitError ?? ""
+            return
+        }
+
+        let request = UUID()
+        gitRequestToken = request
+        isLoadingGitHistory = true
+        status = "正在读取 Git 历史…"
+        DispatchQueue.global(qos: .utility).async {
             do {
-                let old = try FolderComparer.catalog(oldRoot), new = try FolderComparer.catalog(newRoot)
+                let repository = try GitHistoryProvider.discover(projectURL: project.rootURL)
+                let branches = try GitHistoryProvider.branches(repository: repository)
+                let reference = branches.first(where: { $0.isCurrent })?.name ?? branches.first?.name ?? ""
+                let commits = reference.isEmpty ? [] : try GitHistoryProvider.commits(repository: repository, reference: reference)
+                DispatchQueue.main.async {
+                    guard self.gitRequestToken == request else { return }
+                    self.gitRepository = repository
+                    self.gitBranches = branches
+                    self.selectedGitBranchRef = reference
+                    self.gitCommits = commits
+                    self.selectedGitCommitHash = commits.first?.hash ?? ""
+                    self.gitError = branches.isEmpty ? "仓库中没有可读取的本地分支或远程分支。" : nil
+                    self.isLoadingGitHistory = false
+                    self.status = commits.isEmpty
+                        ? "已找到 Git 仓库，但所选分支没有影响 Config/Datas 的提交。"
+                        : "已读取 \(commits.count) 条配置表历史提交。"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.gitRequestToken == request else { return }
+                    self.gitRepository = nil
+                    self.gitBranches = []
+                    self.gitCommits = []
+                    self.selectedGitBranchRef = ""
+                    self.selectedGitCommitHash = ""
+                    self.gitError = error.localizedDescription
+                    self.isLoadingGitHistory = false
+                    self.status = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func refreshGit(project: ExportProject?) {
+        configuredProjectID = nil
+        gitRequestToken = UUID()
+        configureGitProject(project)
+    }
+
+    func selectGitBranch(_ reference: String) {
+        guard sourceMode == .gitHistory, let repository = gitRepository, !reference.isEmpty else { return }
+        selectedGitBranchRef = reference
+        selectedGitCommitHash = ""
+        gitCommits = []
+        gitError = nil
+        let request = UUID()
+        gitRequestToken = request
+        isLoadingGitHistory = true
+        status = "正在读取分支历史…"
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                let commits = try GitHistoryProvider.commits(repository: repository, reference: reference)
+                DispatchQueue.main.async {
+                    guard self.gitRequestToken == request else { return }
+                    self.gitCommits = commits
+                    self.selectedGitCommitHash = commits.first?.hash ?? ""
+                    self.isLoadingGitHistory = false
+                    self.status = commits.isEmpty
+                        ? "所选分支没有影响 Config/Datas 的提交。"
+                        : "已读取 \(commits.count) 条配置表历史提交。"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.gitRequestToken == request else { return }
+                    self.gitCommits = []
+                    self.selectedGitCommitHash = ""
+                    self.gitError = error.localizedDescription
+                    self.isLoadingGitHistory = false
+                    self.status = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func resetComparisonResults() {
+        files = []
+        selectedID = nil
+        checkedFileIDs = []
+        projectionCache = [:]
+        progress = 0
+    }
+
+    private func releaseGitSnapshot() {
+        GitHistoryProvider.removeSnapshot(at: gitSnapshotRoot)
+        gitSnapshotRoot = nil
+    }
+
+    private func installGitSnapshot(_ root: URL) {
+        releaseGitSnapshot()
+        gitSnapshotRoot = root
+    }
+
+    func run() {
+        guard !isRunning else { return }
+        switch sourceMode {
+        case .folders:
+            runFolders()
+        case .gitHistory:
+            runGitHistory()
+        }
+    }
+
+    private func runFolders() {
+        guard let oldRoot, let newRoot else {
+            status = "请选择历史版本和当前版本的配置表目录。"
+            return
+        }
+        startComparison(
+            initialStatus: "正在扫描文件夹…",
+            completionPrefix: "文件夹对比完成") {
+                ComparisonRoots(old: oldRoot, new: newRoot, temporaryRoot: nil)
+            }
+    }
+
+    private func runGitHistory() {
+        guard let repository = gitRepository, let commit = selectedGitCommit else {
+            status = gitError ?? "请选择当前项目、分支和历史提交。"
+            return
+        }
+        startComparison(
+            initialStatus: "正在读取 Git 历史配置表…",
+            completionPrefix: "Git 历史对比完成") {
+                let snapshot = try GitHistoryProvider.materializeSnapshot(repository: repository, commit: commit)
+                return ComparisonRoots(old: snapshot.dataRoot, new: repository.currentDataRoot,
+                                       temporaryRoot: snapshot.rootURL)
+            }
+    }
+
+    private func startComparison(initialStatus: String, completionPrefix: String,
+                                 rootsProvider: @escaping () throws -> ComparisonRoots) {
+        guard !isRunning else { return }
+        let align = alignKeys, token = ComparisonCancellation(); cancellation = token
+        isRunning = true
+        resetComparisonResults()
+        status = initialStatus
+        DispatchQueue.global(qos: .userInitiated).async {
+            var temporaryRoot: URL?
+            do {
+                let roots = try rootsProvider()
+                temporaryRoot = roots.temporaryRoot
+                try token.check()
+                if let temporaryRoot {
+                    DispatchQueue.main.sync { self.installGitSnapshot(temporaryRoot) }
+                }
+                let old = try FolderComparer.catalog(roots.old), new = try FolderComparer.catalog(roots.new)
                 let paths = Set(old.keys).union(new.keys).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
                 for (index, path) in paths.enumerated() {
                     try token.check()
                     let result = FolderComparer.compare(path: path, oldURL: old[path], newURL: new[path], alignKeys: align, cancellation: token)
                     DispatchQueue.main.async {
+                        guard self.cancellation === token else { return }
                         self.files.append(result); self.progress = Double(index + 1) / Double(max(1, paths.count))
                         self.status = "\(index + 1)/\(paths.count) · \(path)"
                         if self.selectedID == nil && result.status != .same { self.select(result.id) }
                     }
                 }
                 DispatchQueue.main.async {
+                    guard self.cancellation === token else {
+                        if let temporaryRoot, self.gitSnapshotRoot != temporaryRoot { GitHistoryProvider.removeSnapshot(at: temporaryRoot) }
+                        return
+                    }
                     self.isRunning = false
                     let failed = self.files.filter { $0.status == .failed }.count
-                    self.status = paths.isEmpty ? "目录中没有识别到表格文件。" : "完成 \(paths.count) 个文件 · \(failed) 个未完成 · 仅比较数据、类型和公式，忽略配色等格式"
+                    self.status = paths.isEmpty ? "目录中没有识别到表格文件。" : "\(completionPrefix)：\(paths.count) 个文件 · \(failed) 个未完成 · 仅比较数据、类型和公式，忽略配色等格式"
+                    if let temporaryRoot, self.gitSnapshotRoot == temporaryRoot { self.releaseGitSnapshot() }
+                    else if let temporaryRoot { GitHistoryProvider.removeSnapshot(at: temporaryRoot) }
                 }
             } catch {
-                DispatchQueue.main.async { self.isRunning = false; self.status = error is CancellationError ? "已停止，当前显示的是部分结果。" : error.localizedDescription }
+                DispatchQueue.main.async {
+                    if let temporaryRoot, self.gitSnapshotRoot == temporaryRoot { self.releaseGitSnapshot() }
+                    else if let temporaryRoot { GitHistoryProvider.removeSnapshot(at: temporaryRoot) }
+                    guard self.cancellation === token else { return }
+                    self.isRunning = false
+                    self.status = error is CancellationError ? "已停止，当前显示的是部分结果。" : error.localizedDescription
+                }
             }
         }
     }
-    func stop() { cancellation.cancel() }
+    func stop() { cancellation.cancel(); status = "正在停止对比…" }
     func projection(for file: ComparedFile, sheetName: String) -> ComparisonTableProjection {
         if let cached = projectionCache[file.id]?[sheetName] { return cached }
         let value = ComparisonTableProjection(file: file, sheetName: sheetName)
@@ -807,12 +1052,22 @@ struct ComparisonSheetTableView: View {
 
 struct FolderComparisonView: View {
     @ObservedObject var model: FolderComparisonModel
+    let project: ExportProject?
     let openFiles: (URL?, URL?) -> Void
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 16) {
-                folder(old: true); Image(systemName: "arrow.right").foregroundStyle(.secondary); folder(old: false)
-                Button(model.isRunning ? "对比中…" : "开始对比") { model.run() }.buttonStyle(.borderedProminent).disabled(model.isRunning || model.oldRoot == nil || model.newRoot == nil)
+            HStack(spacing: 12) {
+                Picker("对比来源", selection: $model.sourceMode) {
+                    ForEach(ComparisonSourceMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }.pickerStyle(.segmented).frame(width: 220).disabled(model.isRunning)
+                if model.sourceMode == .folders {
+                    folder(old: true); Image(systemName: "arrow.right").foregroundStyle(.secondary); folder(old: false)
+                } else {
+                    gitSelector
+                }
+                Spacer(minLength: 4)
+                Button(model.isRunning ? "对比中…" : "开始对比") { model.run() }
+                    .buttonStyle(.borderedProminent).disabled(model.isRunning || !model.canRun)
                 if model.isRunning { Button("停止") { model.stop() } }
             }.padding(16)
             HStack {
@@ -849,6 +1104,9 @@ struct FolderComparisonView: View {
                 }.frame(width: geometry.size.width, height: geometry.size.height)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear { model.configureGitProject(project) }
+        .onChange(of: project?.id) { _, _ in model.configureGitProject(project) }
+        .onChange(of: model.sourceMode) { _, _ in model.sourceModeDidChange(project: project) }
         .onChange(of: model.sheetFilter) { _, _ in model.page = 0 }
         .onChange(of: model.cellQuery) { _, _ in model.page = 0 }
     }
@@ -857,6 +1115,52 @@ struct FolderComparisonView: View {
             HStack { Text(old ? "历史版本" : "当前版本").font(.headline); Button("选择文件夹…") { model.choose(old: old) }.disabled(model.isRunning) }
             Text((old ? model.oldRoot : model.newRoot)?.path ?? "选择包含配置表的文件夹，支持子目录")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private var gitSelector: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Label("当前项目", systemImage: "shippingbox")
+                    .font(.subheadline.weight(.semibold))
+                Text(project?.name ?? "未选择项目").foregroundStyle(project == nil ? .secondary : .primary)
+                Button { model.refreshGit(project: project) } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.bordered).controlSize(.small).disabled(model.isLoadingGitHistory || project == nil)
+                if model.isLoadingGitHistory { ProgressView().controlSize(.small) }
+            }
+            if let repository = model.gitRepository {
+                Text("仓库：\(repository.repositoryRoot.path)").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                Text("表目录：\(repository.dataRelativePath)").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            HStack(spacing: 8) {
+                Picker("分支", selection: $model.selectedGitBranchRef) {
+                    if model.gitBranches.isEmpty { Text("暂无分支").tag("") }
+                    ForEach(model.gitBranches) { branch in Text(branch.label).tag(branch.name) }
+                }.frame(minWidth: 170, maxWidth: 220)
+                    .onChange(of: model.selectedGitBranchRef) { _, value in model.selectGitBranch(value) }
+                    .disabled(model.isLoadingGitHistory || model.gitBranches.isEmpty)
+                Picker("定位", selection: $model.gitCommitSelectionMode) {
+                    ForEach(GitCommitSelectionMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }.frame(width: 90)
+                if model.gitCommitSelectionMode == .commit {
+                    Picker("提交", selection: $model.selectedGitCommitHash) {
+                        if model.gitCommits.isEmpty { Text("暂无提交").tag("") }
+                        ForEach(model.gitCommits) { commit in
+                            Text("\(commit.shortHash) · \(commit.subject)").tag(commit.hash)
+                        }
+                    }.frame(minWidth: 240, maxWidth: 360)
+                } else {
+                    DatePicker("时间点", selection: $model.gitDate, displayedComponents: [.date, .hourAndMinute])
+                        .labelsHidden().frame(width: 170)
+                }
+            }
+            if let commit = model.selectedGitCommit {
+                Text("历史版本：\(commit.shortHash) · \(commit.dateText) · \(commit.subject)")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            if let error = model.gitError {
+                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2).textSelection(.enabled)
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     @ViewBuilder private var detail: some View {
@@ -884,7 +1188,9 @@ struct FolderComparisonView: View {
                             Button("重置大小") { model.resetComparisonZoom() }
                                 .help("恢复为 100%；也可以用触控板捏合，或按住 ⌘ 滚轮缩放")
                         }
-                        Button("在编辑工作区打开新旧表") { openFiles(file.oldURL, file.newURL) }
+                        Button(model.sourceMode == .gitHistory ? "在编辑工作区打开当前表" : "在编辑工作区打开新旧表") {
+                            openFiles(model.sourceMode == .gitHistory ? nil : file.oldURL, file.newURL)
+                        }
                             .disabled(file.oldURL?.pathExtension.lowercased() != "xlsx" && file.newURL?.pathExtension.lowercased() != "xlsx")
                         Button(model.isChecked(file) ? "已检查" : "标记已检查") { model.markSelectedChecked() }
                             .buttonStyle(.borderedProminent)
@@ -931,7 +1237,7 @@ struct FolderComparisonView: View {
                 }
             }.padding(14)
         } else {
-            ContentUnavailableView("文件夹版本对比", systemImage: "doc.on.doc", description: Text("匹配相对路径，逐张比较全部工作表的数据和公式。选择左侧文件查看差异。"))
+            ContentUnavailableView(model.sourceMode == .gitHistory ? "Git 历史对比" : "文件夹版本对比", systemImage: "doc.on.doc", description: Text("匹配相对路径，逐张比较全部工作表的数据和公式。选择左侧文件查看差异。"))
         }
     }
 }

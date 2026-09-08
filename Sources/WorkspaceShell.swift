@@ -307,7 +307,7 @@ struct WorkspaceRootView: View {
                 case "tables":
                     TableWorkspaceView(projects: exporter.projects, projectID: exporter.selectedID, catalog: catalog, workspace: workspace, exportAction: runExport)
                 case "compare":
-                    FolderComparisonView(model: comparison, openFiles: { old, new in
+                    FolderComparisonView(model: comparison, project: exporter.selectedProject, openFiles: { old, new in
                         if let old { workspace.openFile(old, label: "历史版本") }
                         if let new { workspace.openFile(new, label: "当前版本") }
                         section = "tables"

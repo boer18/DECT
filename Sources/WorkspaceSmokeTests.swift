@@ -64,6 +64,58 @@ enum WorkspaceSmokeTests {
         try require(final == original, "真实源表发生变化")
         print("文件夹对比：子目录、全部工作表、2 格精准差异、相同文件、CSV 引号跨行、新增删除、ID 对齐、公式变化和停止通过；源表未改。")
     }
+
+    @MainActor static func gitHistory(_ source: String) throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("TableGitHistory-smoke-\(UUID().uuidString)")
+        let projectRoot = root.appendingPathComponent("Project", isDirectory: true)
+        let dataRoot = projectRoot.appendingPathComponent("Config/Datas", isDirectory: true)
+        try manager.createDirectory(at: dataRoot, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+
+        let file = dataRoot.appendingPathComponent("Table.xlsx")
+        try manager.copyItem(at: URL(fileURLWithPath: source), to: file)
+        func git(_ arguments: [String]) throws {
+            _ = try GridWorkbookIO.capture("/usr/bin/git", arguments, directory: root)
+        }
+        try git(["init", "-q"])
+        try git(["config", "user.name", "Workspace Smoke"])
+        try git(["config", "user.email", "workspace-smoke@example.invalid"])
+        try git(["add", "Project/Config/Datas/Table.xlsx"])
+        try git(["commit", "-qm", "initial table"])
+
+        let committedSnapshot = try GridWorkbookIO.read(file)
+        _ = try GridWorkbookIO.save(committedSnapshot,
+            changes: [GridAddress(row: 4, column: 2): "committed history value"])
+        try git(["add", "Project/Config/Datas/Table.xlsx"])
+        try git(["commit", "-qm", "update table history"])
+
+        let workingSnapshot = try GridWorkbookIO.read(file)
+        _ = try GridWorkbookIO.save(workingSnapshot,
+            changes: [GridAddress(row: 4, column: 2): "uncommitted working value"])
+
+        let repository = try GitHistoryProvider.discover(projectURL: projectRoot)
+        try require(repository.dataRelativePath == "Project/Config/Datas", "Git 配置表相对路径识别失败")
+        let branches = try GitHistoryProvider.branches(repository: repository)
+        try require(branches.contains(where: { $0.name == repository.currentBranch }), "Git 当前分支读取失败")
+        let reference = repository.currentBranch ?? branches.first!.name
+        let commits = try GitHistoryProvider.commits(repository: repository, reference: reference)
+        try require(commits.count >= 2 && commits[0].date >= commits[1].date, "Git 提交历史或时间排序读取失败")
+        let history = try GitHistoryProvider.materializeSnapshot(repository: repository, commit: commits[0])
+        defer { GitHistoryProvider.removeSnapshot(at: history.rootURL) }
+        let historyFile = history.dataRoot.appendingPathComponent("Table.xlsx")
+        try require(manager.fileExists(atPath: historyFile.path), "Git 历史配置表快照未解包")
+        let comparison = FolderComparer.compare(path: "Table.xlsx", oldURL: historyFile, newURL: file,
+            alignKeys: false, cancellation: ComparisonCancellation())
+        try require(comparison.status == .changed && comparison.differences.contains(where: {
+            $0.old == "committed history value" && $0.new == "uncommitted working value"
+        }), "Git 历史与当前未提交工作区对比失败")
+        let snapshotRoot = history.rootURL
+        GitHistoryProvider.removeSnapshot(at: snapshotRoot)
+        try require(!manager.fileExists(atPath: snapshotRoot.path), "Git 历史临时快照未清理")
+        print("Git 历史：仓库识别、分支、提交、临时快照、未提交工作区差异与清理通过。")
+    }
+
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw WorkspaceError(message: message) }
     }
@@ -158,7 +210,7 @@ enum WorkspaceSmokeTests {
                 rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
             let fillEditor = GridEditorModel(); fillEditor.snapshot = fillSnapshot
             fillEditor.select(row: 0, column: 0, extending: false); fillEditor.select(row: 1, column: 0, extending: true)
-            fillEditor.fillSelection(to: 4, targetColumn: 0)
+            _ = fillEditor.fillSelection(to: 4, targetColumn: 0)
             try require(fillEditor.inputText(GridAddress(row: 2, column: 0)) == "5" &&
                         fillEditor.inputText(GridAddress(row: 4, column: 0)) == "9", "数字序列填充失败")
             var dateCells = fillCells
@@ -169,9 +221,29 @@ enum WorkspaceSmokeTests {
                 rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
             let dateEditor = GridEditorModel(); dateEditor.snapshot = dateSnapshot
             dateEditor.select(row: 0, column: 0, extending: false); dateEditor.select(row: 1, column: 0, extending: true)
-            dateEditor.fillSelection(to: 3, targetColumn: 0)
+            _ = dateEditor.fillSelection(to: 3, targetColumn: 0)
             try require(dateEditor.inputText(GridAddress(row: 2, column: 0)) == "2026-09-03" &&
                         dateEditor.inputText(GridAddress(row: 3, column: 0)) == "2026-09-04", "日期序列填充失败")
+            var singleFillCells = fillCells
+            singleFillCells[GridAddress(row: 0, column: 0)] = GridCell(text: "10", formula: false)
+            let singleFillSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: singleFillCells,
+                rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
+            let singleFillEditor = GridEditorModel(); singleFillEditor.snapshot = singleFillSnapshot
+            singleFillEditor.select(row: 0, column: 0, extending: false)
+            try require(singleFillEditor.fillFromHandle(to: 3, targetColumn: 0), "单个数字填充未完成")
+            try require(singleFillEditor.lastFill?.mode == .sequence &&
+                        singleFillEditor.inputText(GridAddress(row: 1, column: 0)) == "11" &&
+                        singleFillEditor.inputText(GridAddress(row: 3, column: 0)) == "13",
+                        "单个数字未按序列自动填充")
+            singleFillEditor.reapplyLastFill(.copy)
+            try require(singleFillEditor.inputText(GridAddress(row: 1, column: 0)) == "10" &&
+                        singleFillEditor.inputText(GridAddress(row: 3, column: 0)) == "10",
+                        "填充选项切换为复制未生效")
+            singleFillEditor.reapplyLastFill(.sequence)
+            try require(singleFillEditor.inputText(GridAddress(row: 1, column: 0)) == "11" &&
+                        singleFillEditor.inputText(GridAddress(row: 3, column: 0)) == "13",
+                        "填充选项切换为序列未生效")
             var fillFormulaCells = fillCells
             fillFormulaCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: true, formulaText: "A1")
             let fillFormulaSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
@@ -180,7 +252,7 @@ enum WorkspaceSmokeTests {
             let fillFormulaEditor = GridEditorModel(); fillFormulaEditor.snapshot = fillFormulaSnapshot
             fillFormulaEditor.edit([GridAddress(row: 0, column: 0): "=A2"])
             fillFormulaEditor.select(row: 0, column: 0, extending: false)
-            fillFormulaEditor.fillSelection(to: 2, targetColumn: 0)
+            _ = fillFormulaEditor.fillSelection(to: 2, targetColumn: 0)
             try require(fillFormulaEditor.inputText(GridAddress(row: 1, column: 0)) == "=A3" &&
                         fillFormulaEditor.inputText(GridAddress(row: 2, column: 0)) == "=A4" &&
                         fillFormulaEditor.formulaAddresses.contains(GridAddress(row: 2, column: 0)), "公式相对引用填充失败")
@@ -192,7 +264,7 @@ enum WorkspaceSmokeTests {
             let longText = String(repeating: "很长的配置内容 Long text\n", count: 1000)
             editor.edit([longAddress: longText])
             editor.fitColumns(); editor.adaptiveRows = true
-            try require(editor.columnWidths.values.allSatisfy { $0 >= 90 && $0 <= 300 }, "自适应列宽超出限制")
+            try require(editor.columnWidths.values.allSatisfy { $0 >= 120 && $0 <= 360 }, "自适应列宽超出限制")
             try require(editor.displayRowHeight(0) == 96, "长文本行高未封顶")
             try require(editor.inputText(longAddress) == longText, "自适应截断了真实内容")
             editor.undo()
@@ -218,6 +290,18 @@ enum WorkspaceSmokeTests {
             grid.sync(from: 3)
             try require(abs(grid.regions[1].scroll.contentView.bounds.origin.x - grid.regions[3].scroll.contentView.bounds.origin.x) < 1, "冻结顶部横向同步失败")
             try require(abs(grid.regions[2].scroll.contentView.bounds.origin.y - grid.regions[3].scroll.contentView.bounds.origin.y) < 1, "冻结左侧纵向同步失败")
+            editor.select(row: 0, column: 0, extending: false)
+            grid.update()
+            grid.regions[3].scroll.contentView.scroll(to: NSPoint(x: 120, y: 180))
+            grid.regions[3].scroll.reflectScrolledClipView(grid.regions[3].scroll.contentView)
+            grid.sync(from: 3)
+            let frozenScrollOrigin = grid.regions[3].scroll.contentView.bounds.origin
+            _ = editor.fillSelection(to: 12, targetColumn: 0, mode: .copy)
+            grid.update()
+            let frozenScrollAfterFill = grid.regions[3].scroll.contentView.bounds.origin
+            try require(abs(frozenScrollAfterFill.x - frozenScrollOrigin.x) < 1 &&
+                        abs(frozenScrollAfterFill.y - frozenScrollOrigin.y) < 1,
+                        "冻结多区域填充后滚动位置跳回顶部")
             editor.frozenRows = 0; editor.frozenColumns = 0; grid.update()
             try require(grid.regions.count == 1 && grid.regions[0].range.lowerBound == 0 &&
                         grid.regions[0].table.dataColumn(0) == -1 &&
@@ -267,6 +351,17 @@ enum WorkspaceSmokeTests {
                         optionButtons.allSatisfy { $0.frame.minX >= 10 },
                         "填充选项浮窗布局、文字字号或左侧留白不符合设计")
             handleEditor.select(row: 0, column: 0, extending: false)
+            handleGrid.update()
+            handleGrid.regions[0].scroll.contentView.scroll(to: NSPoint(x: 100, y: 160))
+            handleGrid.regions[0].scroll.reflectScrolledClipView(handleGrid.regions[0].scroll.contentView)
+            let singleScrollOrigin = handleGrid.regions[0].scroll.contentView.bounds.origin
+            _ = handleEditor.fillSelection(to: 12, targetColumn: 0, mode: .copy)
+            handleGrid.update()
+            let singleScrollAfterFill = handleGrid.regions[0].scroll.contentView.bounds.origin
+            try require(abs(singleScrollAfterFill.x - singleScrollOrigin.x) < 1 &&
+                        abs(singleScrollAfterFill.y - singleScrollOrigin.y) < 1,
+                        "单表填充后滚动位置跳回顶部")
+            handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
             func sendDirect(_ text: String) {
                 let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
@@ -305,7 +400,13 @@ enum WorkspaceSmokeTests {
             testWindow.makeFirstResponder(nil)
             try require(editor.inputText(GridAddress(row: 5, column: 1)) == "double-click edited", "单元格编辑提交失败")
             editor.setZoom(1.5); grid.update()
-            try require(abs(grid.regions[0].scroll.magnification - 1.5) < 0.01, "表格缩放未生效")
+            let scaledHeader = grid.regions[0].table.headerView as? GridColumnHeader
+            let firstHeaderFontSize = grid.regions[0].table.tableColumns.first?.headerCell.font?.pointSize ?? 0
+            try require(abs(grid.regions[0].scroll.magnification - 1.5) < 0.01 &&
+                        abs((scaledHeader?.appliedZoom ?? 0) - 1.5) < 0.01 &&
+                        abs((scaledHeader?.frame.height ?? 0) - 34.5) < 0.5 &&
+                        abs(firstHeaderFontSize - 18) < 0.5,
+                        "表格缩放或字母表头同步缩放未生效")
             editor.setZoom(1); grid.update()
             testWindow.orderOut(nil)
             print("实际双击事件、编辑器保留、文本提交、150% 缩放与重置通过")

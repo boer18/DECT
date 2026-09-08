@@ -352,7 +352,7 @@ final class GridEditorModel: ObservableObject {
                 measured.append(width + 16)
             }
             measured.sort()
-            widths[column] = min(300, max(90, measured.isEmpty ? 140 : measured[min(measured.count - 1, Int(Double(measured.count - 1) * 0.9))]))
+            widths[column] = min(360, max(120, measured.isEmpty ? 160 : measured[min(measured.count - 1, Int(Double(measured.count - 1) * 0.92))]))
         }
         columnWidths = widths; revision += 1
     }
@@ -577,6 +577,19 @@ final class GridEditorModel: ObservableObject {
                 return Self.dateString(date, format: b.format)
             }
         }
+        if sourceColumns.count == 1, sourceRows.count == 1, target.column == sourceColumns.lowerBound,
+           target.row > sourceRows.upperBound {
+            let source = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound)
+            let offset = target.row - source.row
+            if let number = Self.numberValue(inputText(source)) {
+                return Self.numberString(number + Double(offset))
+            }
+            if let date = Self.dateValue(inputText(source)) {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let shifted = calendar.date(byAdding: .day, value: offset, to: date.date) ?? date.date
+                return Self.dateString(shifted, format: date.format)
+            }
+        }
         if sourceRows.count == 1, sourceColumns.count >= 2, target.row == sourceRows.lowerBound,
            target.column > sourceColumns.upperBound {
             let first = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.upperBound - 1)
@@ -590,6 +603,19 @@ final class GridEditorModel: ObservableObject {
                 let step = calendar.dateComponents([.day], from: a.date, to: b.date).day ?? 0
                 let date = calendar.date(byAdding: .day, value: step * offset, to: b.date) ?? b.date
                 return Self.dateString(date, format: b.format)
+            }
+        }
+        if sourceRows.count == 1, sourceColumns.count == 1, target.row == sourceRows.lowerBound,
+           target.column > sourceColumns.upperBound {
+            let source = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound)
+            let offset = target.column - source.column
+            if let number = Self.numberValue(inputText(source)) {
+                return Self.numberString(number + Double(offset))
+            }
+            if let date = Self.dateValue(inputText(source)) {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let shifted = calendar.date(byAdding: .day, value: offset, to: date.date) ?? date.date
+                return Self.dateString(shifted, format: date.format)
             }
         }
         return nil
@@ -923,14 +949,35 @@ final class CellGridTable: NSTableView {
 }
 
 final class GridColumnHeader: NSTableHeaderView {
-    private var resizing = false
+    private var resizingColumn: NSTableColumn?
+    private var resizeStartX: CGFloat = 0
+    private var resizeStartWidth: CGFloat = 0
+    private(set) var appliedZoom: CGFloat = 1
+
+    func applyZoom(_ value: CGFloat) {
+        let zoom = min(2.5, max(0.5, value))
+        appliedZoom = zoom
+        var headerFrame = frame
+        headerFrame.size.height = 23 * zoom
+        if abs(headerFrame.height - frame.height) > 0.1 { frame = headerFrame }
+        for column in tableView?.tableColumns ?? [] {
+            column.headerCell.font = NSFont.systemFont(ofSize: 12 * zoom, weight: .medium)
+        }
+        needsDisplay = true
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let table = tableView as? CellGridTable, let editor = table.editor,
               !editor.isBusy else { return }
         let point = convert(event.locationInWindow, from: nil)
+        if let column = resizableColumn(near: point, in: table) {
+            resizingColumn = column
+            resizeStartX = point.x
+            resizeStartWidth = column.width
+            table.window?.makeFirstResponder(table)
+            return
+        }
         let local = column(at: point)
-        resizing = local >= 0 && abs(headerRect(ofColumn: local).maxX - point.x) < 5
-        if resizing { super.mouseDown(with: event); return }
         let c = table.dataColumn(local)
         table.window?.makeFirstResponder(table)
         table.endDirectTyping()
@@ -938,10 +985,33 @@ final class GridColumnHeader: NSTableHeaderView {
         if c >= 0 { editor.selectColumns(c, extending: event.modifierFlags.contains(.shift)) }
     }
     override func mouseDragged(with event: NSEvent) {
-        if resizing { super.mouseDragged(with: event); return }
+        if let column = resizingColumn {
+            let point = convert(event.locationInWindow, from: nil)
+            column.width = min(column.maxWidth, max(column.minWidth, resizeStartWidth + point.x - resizeStartX))
+            tableView?.needsDisplay = true
+            return
+        }
         guard let table = tableView as? CellGridTable else { return }
         let c = table.dataColumn(column(at: convert(event.locationInWindow, from: nil)))
         if c >= 0 { table.editor?.selectColumns(c, extending: true) }
+    }
+    override func mouseUp(with event: NSEvent) {
+        resizingColumn = nil
+        super.mouseUp(with: event)
+    }
+
+    private func resizableColumn(near point: NSPoint, in table: NSTableView) -> NSTableColumn? {
+        let radius = max(10, 12 * appliedZoom)
+        var result: (column: NSTableColumn, distance: CGFloat)?
+        for index in table.tableColumns.indices {
+            let candidate = table.tableColumns[index]
+            guard Int(candidate.identifier.rawValue) ?? -1 >= 0 else { continue }
+            let boundary = headerRect(ofColumn: index).maxX
+            let distance = abs(boundary - point.x)
+            guard distance <= radius else { continue }
+            if result == nil || distance < result!.distance { result = (candidate, distance) }
+        }
+        return result?.column
     }
 }
 
@@ -1121,6 +1191,10 @@ final class FrozenGridView: NSView {
         // Selection publishes a SwiftUI update immediately after double-click.
         // Reloading here would destroy AppKit's newly created field editor.
         guard !regions.contains(where: { $0.table.editedRow >= 0 }) else { return }
+        let previousOrigins = regions.map { $0.scroll.contentView.bounds.origin }
+        let previousRegionCount = regions.count
+        let previousSignature = signature
+        let revisionToRestore = model.revision
         let focusedTable = window?.firstResponder as? CellGridTable
         let shouldRestoreFocus = focusedTable?.isDescendant(of: self) == true
         let r = min(model.frozenRows, model.rowCount - 1), c = min(model.frozenColumns, model.columnCount - 1)
@@ -1177,6 +1251,7 @@ final class FrozenGridView: NSView {
                         if abs(column.width - width) > 0.1 { column.width = width }
                     }
                 }
+                ($0.table.headerView as? GridColumnHeader)?.applyZoom(model.zoom)
                 $0.table.reloadData(); $0.table.headerView?.needsDisplay = true
             }
             if shouldRestoreFocus {
@@ -1189,6 +1264,58 @@ final class FrozenGridView: NSView {
             needsLayout = true
         }
         updateFillOptionsButton()
+        restoreScrollPositions(
+            previousOrigins,
+            previousRegionCount: previousRegionCount,
+            previousSignature: previousSignature,
+            revision: revisionToRestore)
+    }
+
+    private func restoreScrollPositions(_ origins: [NSPoint], previousRegionCount: Int,
+                                        previousSignature: String, revision: Int) {
+        guard !origins.isEmpty, previousRegionCount == regions.count,
+              previousSignature == signature else { return }
+        layoutSubtreeIfNeeded()
+        for (index, origin) in origins.enumerated() where index < regions.count {
+            let scroll = regions[index].scroll
+            let clip = scroll.contentView
+            let visibleSize = clip.bounds.size
+            let documentSize = scroll.documentView?.frame.size ?? .zero
+            let maximum = NSPoint(
+                x: max(0, documentSize.width - visibleSize.width),
+                y: max(0, documentSize.height - visibleSize.height))
+            let target = NSPoint(
+                x: min(max(0, origin.x), maximum.x),
+                y: min(max(0, origin.y), maximum.y))
+            clip.scroll(to: target)
+            scroll.reflectScrolledClipView(clip)
+        }
+        if regions.count == 4 { sync(from: 3) }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.model.revision == revision,
+                  self.signature == previousSignature else { return }
+            self.layoutSubtreeIfNeeded()
+            self.restoreScrollPositionsImmediately(origins)
+        }
+    }
+
+    private func restoreScrollPositionsImmediately(_ origins: [NSPoint]) {
+        guard origins.count == regions.count else { return }
+        for (index, origin) in origins.enumerated() {
+            let scroll = regions[index].scroll
+            let clip = scroll.contentView
+            let visibleSize = clip.bounds.size
+            let documentSize = scroll.documentView?.frame.size ?? .zero
+            let maximum = NSPoint(
+                x: max(0, documentSize.width - visibleSize.width),
+                y: max(0, documentSize.height - visibleSize.height))
+            let target = NSPoint(
+                x: min(max(0, origin.x), maximum.x),
+                y: min(max(0, origin.y), maximum.y))
+            clip.scroll(to: target)
+            scroll.reflectScrolledClipView(clip)
+        }
+        if regions.count == 4 { sync(from: 3) }
     }
     override func layout() {
         super.layout()
@@ -1384,7 +1511,7 @@ struct GridEditorPane: View {
                         Button(model.adaptiveRows ? "关闭自动换行与行高" : "自动换行与行高") { commit(); model.adaptiveRows.toggle() }
                         Divider()
                         Button("恢复默认行高、列宽") { commit(); model.resetCellLayout() }
-                    }.help("列宽最多 300，行高最多 96；超长内容可在内容栏右侧展开查看")
+                    }.help("列宽 120～360，行高最多 96；超长内容可在内容栏右侧展开查看")
                     Spacer()
                     Button("−") { commit(); model.setZoom(model.zoom - 0.1) }
                     Text("\(Int((model.zoom * 100).rounded()))%")
