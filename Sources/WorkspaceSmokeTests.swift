@@ -262,7 +262,7 @@ enum WorkspaceSmokeTests {
             let fillOptions = FillOptionsViewController(model: handleEditor, onFinish: {})
             _ = fillOptions.view
             try require(fillOptions.preferredContentSize.width <= 150 &&
-                        fillOptions.preferredContentSize.height <= 58,
+                        fillOptions.preferredContentSize.height <= 44,
                         "填充选项浮窗留白过大")
             handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)

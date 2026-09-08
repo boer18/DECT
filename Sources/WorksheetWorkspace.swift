@@ -942,13 +942,15 @@ final class FillOptionsViewController: NSViewController {
         sequenceButton.setButtonType(.radio)
         copyButton.target = self; copyButton.action = #selector(selectCopy)
         sequenceButton.target = self; sequenceButton.action = #selector(selectSequence)
-        copyButton.controlSize = .small; sequenceButton.controlSize = .small
+        copyButton.controlSize = NSControl.ControlSize.mini
+        sequenceButton.controlSize = NSControl.ControlSize.mini
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 150, height: 58))
+        let rootSize = NSSize(width: 150, height: 44)
+        let root = NSView(frame: NSRect(origin: .zero, size: rootSize))
         let stack = NSStackView(views: [copyButton, sequenceButton])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -958,11 +960,11 @@ final class FillOptionsViewController: NSViewController {
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 7),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -7)
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4)
         ])
         view = root
-        preferredContentSize = root.frame.size
+        preferredContentSize = rootSize
         switch model.lastFill?.mode {
         case .copy: copyButton.state = .on; sequenceButton.state = .off
         case .sequence: copyButton.state = .off; sequenceButton.state = .on
@@ -1087,6 +1089,7 @@ final class FrozenGridView: NSView {
             self?.needsLayout = true
         }
         fillOptionsPopover = popover
+        popover.contentSize = NSSize(width: 150, height: 44)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
     }
 
