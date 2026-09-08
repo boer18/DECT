@@ -1005,19 +1005,22 @@ final class FrozenGridView: NSView {
         super.init(frame: .zero)
         let image = NSImage(systemSymbolName: "arrow.down.right.square",
                             accessibilityDescription: "填充选项") ?? NSImage(size: NSSize(width: 16, height: 16))
-        let button = NSButton(image: image,
-                              target: nil, action: nil)
+        let button = NSButton(title: "⌄", target: nil, action: nil)
+        button.image = image
         button.setButtonType(.momentaryPushIn)
         button.bezelStyle = NSButton.BezelStyle.roundRect
         button.controlSize = NSControl.ControlSize.small
-        button.imagePosition = NSControl.ImagePosition.imageOnly
+        button.imagePosition = NSControl.ImagePosition.imageLeading
+        button.imageHugsTitle = true
         button.imageScaling = NSImageScaling.scaleProportionallyDown
+        button.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        button.alignment = .center
         button.contentTintColor = NSColor.secondaryLabelColor
         button.toolTip = "填充选项"
         button.setAccessibilityLabel("填充选项")
         button.target = self
         button.action = #selector(toggleFillOptions)
-        button.frame = NSRect(x: 0, y: 0, width: 30, height: 22)
+        button.frame = NSRect(x: 0, y: 0, width: 34, height: 22)
         button.isHidden = true
         fillOptionsButton = button
         addSubview(button)
@@ -1056,7 +1059,7 @@ final class FrozenGridView: NSView {
             return
         }
         let handleRect = table.convert(handle, to: self)
-        let size = NSSize(width: 30, height: 22)
+        let size = NSSize(width: 34, height: 22)
         var x = handleRect.maxX + 4
         var y = handleRect.minY - 4
         if x + size.width > bounds.width { x = handleRect.minX - size.width - 4 }
