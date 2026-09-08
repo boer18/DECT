@@ -935,8 +935,8 @@ final class FillOptionsViewController: NSViewController {
     init(model: GridEditorModel, onFinish: @escaping () -> Void) {
         self.model = model
         self.onFinish = onFinish
-        copyButton = NSButton(title: "复制单元格(C)", target: nil, action: nil)
-        sequenceButton = NSButton(title: "以序列方式填充(S)", target: nil, action: nil)
+        copyButton = NSButton(title: "复制单元格", target: nil, action: nil)
+        sequenceButton = NSButton(title: "以序列方式填充", target: nil, action: nil)
         super.init(nibName: nil, bundle: nil)
         copyButton.setButtonType(.radio)
         sequenceButton.setButtonType(.radio)
@@ -948,18 +948,18 @@ final class FillOptionsViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 76))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 150, height: 58))
         let stack = NSStackView(views: [copyButton, sequenceButton])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 2
+        stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -10),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 7),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -7)
         ])
         view = root
         preferredContentSize = root.frame.size
