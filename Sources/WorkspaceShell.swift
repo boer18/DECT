@@ -329,6 +329,9 @@ struct WorkspaceRootView: View {
         }
         .frame(minWidth: 1120, minHeight: 700)
         .sheet(isPresented: $updater.showsPanel) { AppUpdatePanel(updater: updater).interactiveDismissDisabled(updater.busy) }
+        .sheet(isPresented: $language.showsTranslationSettings) {
+            TranslationSettingsView(onSaved: { })
+        }
         .task {
             exporter.start()
             updater.mayRestart = { !workspace.hasPendingChanges && !workspace.isBusy && !exporter.isExporting && !language.isBusy && language.pendingChangeCount == 0 && !comparison.isRunning }

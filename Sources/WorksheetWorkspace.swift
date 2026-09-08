@@ -724,6 +724,19 @@ final class CellGridTable: NSTableView {
     var rowOffset = 0
     var draggingRows = false
     private var filling = false
+    private var directTypingAddress: GridAddress?
+
+    func endDirectTyping() {
+        directTypingAddress = nil
+    }
+
+    private func enterDirectText(_ typed: String, editor: GridEditorModel) {
+        let address = GridAddress(row: editor.anchor.row, column: editor.anchor.column)
+        let value = directTypingAddress == address ? editor.inputText(address) + typed : typed
+        editor.edit([address: value])
+        directTypingAddress = address
+    }
+
     func dataColumn(_ local: Int) -> Int {
         guard tableColumns.indices.contains(local) else { return -2 }
         return Int(tableColumns[local].identifier.rawValue) ?? -2
@@ -811,6 +824,7 @@ final class CellGridTable: NSTableView {
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
         guard let editor, !editor.isBusy else { return }
+        endDirectTyping()
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), localColumn = column(at: p)
         if let handle = fillHandleRect(), handle.insetBy(dx: -5, dy: -5).contains(p) {
             editor.onActivate?()
@@ -853,11 +867,12 @@ final class CellGridTable: NSTableView {
         }
         super.mouseUp(with: event)
     }
-    @objc func copy(_ sender: Any?) { editor?.copy() }
-    @objc func paste(_ sender: Any?) { editor?.paste() }
+    @objc func copy(_ sender: Any?) { endDirectTyping(); editor?.copy() }
+    @objc func paste(_ sender: Any?) { endDirectTyping(); editor?.paste() }
     override func keyDown(with event: NSEvent) {
         guard let editor, !editor.isBusy else { return }
         if event.modifierFlags.contains(.command) {
+            endDirectTyping()
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "c": editor.copy()
             case "v": editor.paste()
@@ -878,8 +893,9 @@ final class CellGridTable: NSTableView {
         case 124, 48: column += 1
         case 125: row += 1
         case 126: row -= 1
-        case 51, 117: editor.clearSelection(); return
+        case 51, 117: endDirectTyping(); editor.clearSelection(); return
         case 36:
+            endDirectTyping()
             let local = tableColumns.firstIndex { $0.identifier.rawValue == String(column) }
             if let local, row >= rowOffset, row - rowOffset < numberOfRows { editColumn(local, row: row - rowOffset, with: event, select: true) }
             return
@@ -890,13 +906,16 @@ final class CellGridTable: NSTableView {
                !typed.isEmpty,
                typed.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) {
                 // Excel-style direct entry: a normal single click followed by
-                // typing replaces the selected cell immediately, without
-                // opening a field editor or showing a caret.
-                editor.edit([GridAddress(row: editor.anchor.row, column: editor.anchor.column): typed])
+                // typing replaces the selected cell immediately. Further
+                // characters in the same typing session append to that first
+                // character, without opening a field editor or showing a caret.
+                enterDirectText(typed, editor: editor)
                 return
             }
+            endDirectTyping()
             super.keyDown(with: event); return
         }
+        endDirectTyping()
         editor.select(row: row, column: column, extending: extending)
         if editor.extent.row >= rowOffset { scrollRowToVisible(editor.extent.row - rowOffset) }
         if let c = tableColumns.firstIndex(where: { $0.identifier.rawValue == String(editor.extent.column) }) { scrollColumnToVisible(c) }
@@ -914,6 +933,7 @@ final class GridColumnHeader: NSTableHeaderView {
         if resizing { super.mouseDown(with: event); return }
         let c = table.dataColumn(local)
         table.window?.makeFirstResponder(table)
+        table.endDirectTyping()
         table.editor?.onActivate?()
         if c >= 0 { editor.selectColumns(c, extending: event.modifierFlags.contains(.shift)) }
     }
@@ -967,11 +987,12 @@ final class FillOptionsViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        let inset: CGFloat = 4
+        let horizontalInset: CGFloat = 10
+        let verticalInset: CGFloat = 4
         let rowHeight: CGFloat = 21
-        let width = max(0, view.bounds.width - inset * 2)
-        sequenceButton.frame = NSRect(x: inset, y: inset, width: width, height: rowHeight)
-        copyButton.frame = NSRect(x: inset, y: view.bounds.height - inset - rowHeight,
+        let width = max(0, view.bounds.width - horizontalInset * 2)
+        sequenceButton.frame = NSRect(x: horizontalInset, y: verticalInset, width: width, height: rowHeight)
+        copyButton.frame = NSRect(x: horizontalInset, y: view.bounds.height - verticalInset - rowHeight,
                                   width: width, height: rowHeight)
     }
 

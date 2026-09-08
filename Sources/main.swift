@@ -816,16 +816,18 @@ enum TranslationSettingsStore {
 
     static func load() -> TranslationAPIConfiguration {
         let legacyDefaults = UserDefaults(suiteName: legacySuiteName)
-        let ownKey = keychainValue()
-        let legacyKey = legacyDefaults?.string(forKey: "LanguageTool_ApiKey") ?? ""
+        // The API key belongs to this app and must be entered by each user.
+        // Keep the legacy suite only for non-sensitive endpoint/model defaults;
+        // never read or fall back to TCST's LanguageTool key.
+        let ownKey = keychainValue().map(stripWhitespace)
         let endpoint = UserDefaults.standard.string(forKey: endpointDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyEndpoint = legacyDefaults?.string(forKey: "LanguageTool_ApiUrl")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = UserDefaults.standard.string(forKey: modelDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyModel = legacyDefaults?.string(forKey: "LanguageTool_Model")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKey = ownKey ?? legacyKey
-        let keySource = ownKey != nil ? "本工具钥匙串" : (legacyKey.isEmpty ? "未配置" : "TCST 多语言工具")
+        let apiKey = ownKey ?? ""
+        let keySource = apiKey.isEmpty ? "未配置" : "本工具钥匙串"
         return TranslationAPIConfiguration(
-            apiKey: stripWhitespace(apiKey),
+            apiKey: apiKey,
             endpoint: endpoint?.isEmpty == false ? endpoint! : (legacyEndpoint?.isEmpty == false ? legacyEndpoint! : TranslationAPIConfiguration.defaultEndpoint),
             model: model?.isEmpty == false ? model! : (legacyModel?.isEmpty == false ? legacyModel! : TranslationAPIConfiguration.defaultModel),
             keySourceDescription: keySource
@@ -912,7 +914,7 @@ enum TranslationClient {
         configuration: TranslationAPIConfiguration
     ) async throws -> [String: String] {
         guard configuration.hasAPIKey else {
-            throw TranslationSettingsError(message: "尚未找到 API Key，请在“翻译设置”中填写或先在 TCST 多语言工具中保存。")
+            throw TranslationSettingsError(message: "尚未配置本工具的 API Key，请在“翻译 API 设置”中填写。")
         }
         guard !targetLanguages.isEmpty else { return [:] }
         let prompt = translationPrompt(
@@ -931,7 +933,7 @@ enum TranslationClient {
 
     static func test(configuration: TranslationAPIConfiguration) async throws {
         guard configuration.hasAPIKey else {
-            throw TranslationSettingsError(message: "尚未找到 API Key。")
+            throw TranslationSettingsError(message: "尚未配置本工具的 API Key，请在“翻译 API 设置”中填写。")
         }
         _ = try await request(prompt: "Reply with exactly one word: OK", configuration: configuration)
     }
@@ -941,7 +943,7 @@ enum TranslationClient {
         configuration: TranslationAPIConfiguration
     ) async throws -> [TranslationConsistencyFinding] {
         guard configuration.hasAPIKey else {
-            throw TranslationSettingsError(message: "尚未找到 API Key，请在“翻译设置”中填写或先在 TCST 多语言工具中保存。")
+            throw TranslationSettingsError(message: "尚未配置本工具的 API Key，请在“翻译 API 设置”中填写。")
         }
         guard !requests.isEmpty else { return [] }
         let content = try await request(
@@ -1229,7 +1231,8 @@ final class LanguageBrowserViewModel: ObservableObject {
         }
         let configuration = TranslationSettingsStore.load()
         guard configuration.hasAPIKey else {
-            errorMessage = "没有可用 API Key。请打开“翻译设置”填写，或先在 TCST 多语言工具里保存。"
+            errorMessage = "请先在“翻译 API 设置”中填写本工具的 API Key。"
+            showsTranslationSettings = true
             return
         }
 
@@ -1289,7 +1292,8 @@ final class LanguageBrowserViewModel: ObservableObject {
         }
         let configuration = TranslationSettingsStore.load()
         guard configuration.hasAPIKey else {
-            errorMessage = "没有可用 API Key。请先在“翻译设置”中完成配置。"
+            errorMessage = "请先在“翻译 API 设置”中填写本工具的 API Key。"
+            showsTranslationSettings = true
             return
         }
 
@@ -1598,13 +1602,13 @@ struct TranslationSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("翻译设置").font(.title2.weight(.semibold))
-            Text("会优先直接使用 TCST 多语言工具已保存的本机 API Key。此处填写新的 Key 时，会保存在本机 macOS 钥匙串，界面和日志都不会显示密钥内容。")
+            Text("本工具使用独立的 API Key。请每位使用者在这里填写自己的 Key；API URL 和 Model 会保存在本机设置中，Key 会保存在本工具专用的 macOS 钥匙串项目中。工具不会读取或复用 TCST 多语言工具的 API Key。")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Form {
                 TextField("API URL", text: $model.endpoint)
-                SecureField("新 API Key（留空则继续使用已有 Key）", text: $model.apiKeyInput)
+                SecureField("本工具 API Key（留空则保留已有 Key）", text: $model.apiKeyInput)
                 TextField("Model", text: $model.modelName)
             }
             .formStyle(.grouped)
@@ -2394,9 +2398,6 @@ struct LanguageBrowserView: View {
         }
         .onChange(of: model.entryFilter) { _, _ in model.normalizeEntrySelection() }
         .onChange(of: model.searchText) { _, _ in model.normalizeEntrySelection() }
-        .sheet(isPresented: $model.showsTranslationSettings) {
-            TranslationSettingsView(onSaved: { })
-        }
         .sheet(isPresented: $model.showsConsistencyResults) {
             TranslationConsistencyResultsView(
                 checkedEntryCount: model.consistencyCheckedEntryCount,

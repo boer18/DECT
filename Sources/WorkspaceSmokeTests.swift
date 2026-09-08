@@ -263,14 +263,18 @@ enum WorkspaceSmokeTests {
             _ = fillOptions.view
             let optionButtons = fillOptions.view.subviews.compactMap { $0 as? NSButton }
             try require(fillOptions.preferredContentSize == FillOptionsViewController.contentSize &&
-                        optionButtons.count == 2 && optionButtons.allSatisfy { ($0.font?.pointSize ?? 0) >= 13 },
-                        "填充选项浮窗布局或文字字号不符合紧凑设计")
+                        optionButtons.count == 2 && optionButtons.allSatisfy { ($0.font?.pointSize ?? 0) >= 13 } &&
+                        optionButtons.allSatisfy { $0.frame.minX >= 10 },
+                        "填充选项浮窗布局、文字字号或左侧留白不符合设计")
             handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
-            let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                windowNumber: handleWindow.windowNumber, context: nil, characters: "直接替换", charactersIgnoringModifiers: "直接替换",
-                isARepeat: false, keyCode: 0)!
-            handleTable.keyDown(with: directKey)
+            func sendDirect(_ text: String) {
+                let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: handleWindow.windowNumber, context: nil, characters: text,
+                    charactersIgnoringModifiers: text, isARepeat: false, keyCode: 0)!
+                handleTable.keyDown(with: directKey)
+            }
+            sendDirect("直"); sendDirect("接"); sendDirect("替"); sendDirect("换")
             try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "单击后键盘直接替换单元格失败")
             handleEditor.edit([GridAddress(row: 0, column: 0): "one"])
             handleEditor.edit([GridAddress(row: 0, column: 0): "two"])
