@@ -1274,7 +1274,7 @@ final class FrozenGridView: NSView {
     private func restoreScrollPositions(_ origins: [NSPoint], previousRegionCount: Int,
                                         previousSignature: String, revision: Int) {
         guard !origins.isEmpty, previousRegionCount == regions.count,
-              previousSignature == signature else { return }
+              viewportLayout(previousSignature) == viewportLayout(signature) else { return }
         layoutSubtreeIfNeeded()
         for (index, origin) in origins.enumerated() where index < regions.count {
             let scroll = regions[index].scroll
@@ -1293,10 +1293,14 @@ final class FrozenGridView: NSView {
         if regions.count == 4 { sync(from: 3) }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.model.revision == revision,
-                  self.signature == previousSignature else { return }
+                  self.viewportLayout(previousSignature) == self.viewportLayout(self.signature) else { return }
             self.layoutSubtreeIfNeeded()
             self.restoreScrollPositionsImmediately(origins)
         }
+    }
+
+    private func viewportLayout(_ value: String) -> String {
+        value.split(separator: "/").prefix(2).joined(separator: "/")
     }
 
     private func restoreScrollPositionsImmediately(_ origins: [NSPoint]) {
