@@ -42,6 +42,15 @@ struct GridSnapshot {
     let rowCount: Int
     let columnCount: Int
 }
+enum GridFillMode: Equatable {
+    case copy
+    case sequence
+}
+struct GridFillRequest: Identifiable {
+    let id = UUID()
+    let row: Int
+    let column: Int
+}
 struct WorkspaceError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -300,7 +309,9 @@ final class GridEditorModel: ObservableObject {
     @Published var frozenRows = 0
     @Published var frozenColumns = 0
     @Published var showingFullContent = false
+    @Published var pendingFill: GridFillRequest?
     @Published var zoom: CGFloat = 1
+    var fillPreviewTarget: GridAddress?
     func setZoom(_ value: CGFloat) { zoom = min(2.5, max(0.5, value)); revision += 1 }
     var columnWidths: [Int: CGFloat] = [:] { didSet { rowHeights.removeAll() } }
     @Published var adaptiveRows = false { didSet { rowHeights.removeAll(); revision += 1 } }
@@ -444,6 +455,7 @@ final class GridEditorModel: ObservableObject {
                 switch result {
                 case .success(let value):
                     self.snapshot = value; self.history = []; self.redoHistory = []; self.formulaAddresses = []
+                    self.pendingFill = nil; self.fillPreviewTarget = nil
                     self.observedStamp = Self.stamp(value.fileURL)
                     self.anchor = GridAddress(row: 0, column: 0); self.extent = self.anchor; self.revision += 1
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -577,7 +589,21 @@ final class GridEditorModel: ObservableObject {
         }
         return nil
     }
-    func fillSelection(to targetRow: Int, targetColumn: Int) {
+    func queueFill(to targetRow: Int, targetColumn: Int) {
+        guard !isBusy else { return }
+        fillPreviewTarget = GridAddress(row: targetRow, column: targetColumn)
+        pendingFill = GridFillRequest(row: targetRow, column: targetColumn)
+        message = nil; isError = false
+    }
+    func applyPendingFill(_ mode: GridFillMode) {
+        guard let request = pendingFill else { return }
+        pendingFill = nil; fillPreviewTarget = nil; revision += 1
+        fillSelection(to: request.row, targetColumn: request.column, mode: mode)
+    }
+    func cancelPendingFill() {
+        pendingFill = nil; fillPreviewTarget = nil; revision += 1
+    }
+    func fillSelection(to targetRow: Int, targetColumn: Int, mode: GridFillMode = .sequence) {
         guard !isBusy, snapshot != nil else { return }
         let sourceRows = rows, sourceColumns = columns
         let endRow = max(sourceRows.upperBound, min(rowCount - 1, targetRow))
@@ -597,7 +623,7 @@ final class GridEditorModel: ObservableObject {
                     row: sourceRows.lowerBound + (row - sourceRows.lowerBound) % sourceRows.count,
                     column: sourceColumns.lowerBound + (column - sourceColumns.lowerBound) % sourceColumns.count)
                 let value: String
-                if let sequence = sequenceValue(at: target, rows: sourceRows, columns: sourceColumns) {
+                if mode == .sequence, let sequence = sequenceValue(at: target, rows: sourceRows, columns: sourceColumns) {
                     value = sequence
                 } else if isFormula(source), let formula = GridWorkbookIO.formulaBody(inputText(source)) {
                     value = Self.shiftedFormula("=\(formula)", rowDelta: row - source.row, columnDelta: column - source.column)
@@ -657,7 +683,8 @@ final class GridEditorModel: ObservableObject {
                 self.isBusy = false
                 switch result {
                 case .success(let saved):
-                    self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []; self.revision += 1
+                    self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []
+                    self.pendingFill = nil; self.fillPreviewTarget = nil; self.revision += 1
                     self.observedStamp = Self.stamp(saved.fileURL)
                     self.message = "已保存 \(updates.count) 个单元格"; afterSave?()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -672,7 +699,6 @@ final class CellGridTable: NSTableView {
     var rowOffset = 0
     var draggingRows = false
     private var filling = false
-    private var fillTarget: GridAddress?
     func dataColumn(_ local: Int) -> Int {
         guard tableColumns.indices.contains(local) else { return -2 }
         return Int(tableColumns[local].identifier.rawValue) ?? -2
@@ -687,6 +713,44 @@ final class CellGridTable: NSTableView {
         let side = min(CGFloat(8), max(CGFloat(6), min(cell.width, cell.height) - 4))
         return NSRect(x: cell.maxX - side / 2, y: cell.maxY - side / 2, width: side, height: side)
     }
+    private func invalidateFillPreview() {
+        var view: NSView? = self
+        while let current = view {
+            if let grid = current as? FrozenGridView {
+                grid.regions.forEach { $0.table.needsDisplay = true }
+                return
+            }
+            view = current.superview
+        }
+        needsDisplay = true
+    }
+    private func fillPreviewRects() -> [NSRect] {
+        guard let editor, let target = editor.fillPreviewTarget else { return [] }
+        let sourceRows = editor.rows, sourceColumns = editor.columns
+        let endRow = max(sourceRows.upperBound, target.row)
+        let endColumn = max(sourceColumns.upperBound, target.column)
+        func rect(for rows: ClosedRange<Int>, columns: ClosedRange<Int>) -> NSRect? {
+            let lowRow = max(rows.lowerBound, rowOffset)
+            let highRow = min(rows.upperBound, rowOffset + numberOfRows - 1)
+            guard lowRow <= highRow else { return nil }
+            let localColumns = tableColumns.indices.filter { local in
+                let column = dataColumn(local)
+                return column >= columns.lowerBound && column <= columns.upperBound
+            }
+            guard let firstColumn = localColumns.first, let lastColumn = localColumns.last else { return nil }
+            let firstRow = lowRow - rowOffset, lastRow = highRow - rowOffset
+            return frameOfCell(atColumn: firstColumn, row: firstRow)
+                .union(frameOfCell(atColumn: lastColumn, row: lastRow))
+        }
+        var result: [NSRect] = []
+        if endColumn > sourceColumns.upperBound,
+           let right = rect(for: sourceRows.lowerBound...endRow,
+                            columns: sourceColumns.upperBound + 1...endColumn) { result.append(right) }
+        if endRow > sourceRows.upperBound,
+           let bottom = rect(for: sourceRows.upperBound + 1...endRow,
+                             columns: sourceColumns.lowerBound...endColumn) { result.append(bottom) }
+        return result
+    }
     private func updateFillTarget(with event: NSEvent) {
         guard filling, let editor else { return }
         let point = convert(event.locationInWindow, from: nil)
@@ -700,33 +764,32 @@ final class CellGridTable: NSTableView {
         guard localRow >= 0, column >= 0 else { return }
         let address = GridAddress(row: localRow + rowOffset, column: column)
         guard address.row >= editor.rows.upperBound || address.column >= editor.columns.upperBound else {
-            fillTarget = nil; needsDisplay = true; return
+            editor.fillPreviewTarget = nil; invalidateFillPreview(); return
         }
-        fillTarget = address; needsDisplay = true
+        editor.fillPreviewTarget = address; invalidateFillPreview()
     }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let handle = fillHandleRect() else { return }
-        NSColor.controlAccentColor.setFill()
-        NSBezierPath(roundedRect: handle.insetBy(dx: 1, dy: 1), xRadius: 1.5, yRadius: 1.5).fill()
-        if let target = fillTarget,
-           let targetRow = tableColumns.firstIndex(where: { $0.identifier.rawValue == String(target.column) }),
-           target.row - rowOffset >= 0, target.row - rowOffset < numberOfRows {
-            let sourceCell = frameOfCell(atColumn: targetRow, row: target.row - rowOffset)
-            NSColor.controlAccentColor.setStroke()
-            let outline = NSBezierPath(rect: sourceCell.insetBy(dx: 1, dy: 1))
-            outline.lineWidth = 2
+        for rect in fillPreviewRects() {
+            NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+            rect.insetBy(dx: 1, dy: 1).fill()
+            NSColor.controlAccentColor.withAlphaComponent(0.8).setStroke()
+            let outline = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1))
+            outline.lineWidth = 1.5
             outline.setLineDash([4, 3], count: 2, phase: 0)
             outline.stroke()
         }
+        guard let handle = fillHandleRect() else { return }
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: handle.insetBy(dx: 1, dy: 1), xRadius: 1.5, yRadius: 1.5).fill()
     }
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
-        guard let editor, !editor.isBusy else { return }
+        guard let editor, !editor.isBusy, editor.pendingFill == nil else { return }
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), localColumn = column(at: p)
         if let handle = fillHandleRect(), handle.insetBy(dx: -5, dy: -5).contains(p) {
             editor.onActivate?()
-            filling = true; fillTarget = nil
+            filling = true; editor.fillPreviewTarget = nil; invalidateFillPreview()
             window?.makeFirstResponder(self)
             return
         }
@@ -756,9 +819,10 @@ final class CellGridTable: NSTableView {
     override func mouseUp(with event: NSEvent) {
         if filling {
             updateFillTarget(with: event)
-            let target = fillTarget
-            filling = false; fillTarget = nil; needsDisplay = true
-            if let target { editor?.fillSelection(to: target.row, targetColumn: target.column) }
+            let target = editor?.fillPreviewTarget
+            filling = false
+            if let target { editor?.queueFill(to: target.row, targetColumn: target.column) }
+            else { editor?.fillPreviewTarget = nil; invalidateFillPreview() }
             return
         }
         super.mouseUp(with: event)
@@ -766,13 +830,17 @@ final class CellGridTable: NSTableView {
     @objc func copy(_ sender: Any?) { editor?.copy() }
     @objc func paste(_ sender: Any?) { editor?.paste() }
     override func keyDown(with event: NSEvent) {
-        guard let editor, !editor.isBusy else { return }
+        guard let editor, !editor.isBusy, editor.pendingFill == nil else { return }
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "c": editor.copy()
             case "v": editor.paste()
             case "s": editor.save()
-            case "z": event.modifierFlags.contains(.shift) ? editor.redo() : editor.undo()
+            case "z":
+                event.modifierFlags.contains(.shift) ? editor.redo() : editor.undo()
+                // reloadData can make AppKit move focus to the window content;
+                // keep the grid as the responder so repeated ⌘Z works.
+                window?.makeFirstResponder(self)
             default: super.keyDown(with: event)
             }
             return
@@ -789,7 +857,19 @@ final class CellGridTable: NSTableView {
             let local = tableColumns.firstIndex { $0.identifier.rawValue == String(column) }
             if let local, row >= rowOffset, row - rowOffset < numberOfRows { editColumn(local, row: row - rowOffset, with: event, select: true) }
             return
-        default: super.keyDown(with: event); return
+        default:
+            let blockedModifiers: NSEvent.ModifierFlags = [.command, .control, .option]
+            if event.modifierFlags.intersection(blockedModifiers).isEmpty,
+               let typed = event.characters,
+               !typed.isEmpty,
+               typed.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) {
+                // Excel-style direct entry: a normal single click followed by
+                // typing replaces the selected cell immediately, without
+                // opening a field editor or showing a caret.
+                editor.edit([GridAddress(row: editor.anchor.row, column: editor.anchor.column): typed])
+                return
+            }
+            super.keyDown(with: event); return
         }
         editor.select(row: row, column: column, extending: extending)
         if editor.extent.row >= rowOffset { scrollRowToVisible(editor.extent.row - rowOffset) }
@@ -800,7 +880,8 @@ final class CellGridTable: NSTableView {
 final class GridColumnHeader: NSTableHeaderView {
     private var resizing = false
     override func mouseDown(with event: NSEvent) {
-        guard let table = tableView as? CellGridTable, let editor = table.editor, !editor.isBusy else { return }
+        guard let table = tableView as? CellGridTable, let editor = table.editor,
+              !editor.isBusy, editor.pendingFill == nil else { return }
         let point = convert(event.locationInWindow, from: nil)
         let local = column(at: point)
         resizing = local >= 0 && abs(headerRect(ofColumn: local).maxX - point.x) < 5
@@ -845,6 +926,8 @@ final class FrozenGridView: NSView {
         // Selection publishes a SwiftUI update immediately after double-click.
         // Reloading here would destroy AppKit's newly created field editor.
         guard !regions.contains(where: { $0.table.editedRow >= 0 }) else { return }
+        let focusedTable = window?.firstResponder as? CellGridTable
+        let shouldRestoreFocus = focusedTable?.isDescendant(of: self) == true
         let r = min(model.frozenRows, model.rowCount - 1), c = min(model.frozenColumns, model.columnCount - 1)
         let key = "\(r)/\(c)/\(model.columnCount)/\(model.rowCount)"
         if signature != key {
@@ -898,6 +981,13 @@ final class FrozenGridView: NSView {
                     }
                 }
                 $0.table.reloadData(); $0.table.headerView?.needsDisplay = true
+            }
+            if shouldRestoreFocus {
+                let target = regions.first(where: {
+                    $0.range.contains(model.anchor.row) &&
+                    $0.table.tableColumns.contains { $0.identifier.rawValue == String(model.anchor.column) }
+                })?.table ?? regions.last?.table
+                if let target { window?.makeFirstResponder(target) }
             }
             needsLayout = true
         }
@@ -1103,6 +1193,18 @@ struct GridEditorPane: View {
                     Button("重置大小") { commit(); model.setZoom(1) }
                 }.controlSize(.small).padding(.horizontal, 12).padding(.vertical, 5)
                 CellGrid(model: model)
+                if let request = model.pendingFill {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.right.square").foregroundStyle(.tint)
+                        Text("填充到 \(GridAddress(row: request.row, column: request.column).reference)")
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        Button("取消") { model.cancelPendingFill() }
+                        Button("复制单元格") { model.applyPendingFill(.copy) }
+                        Button("序列填充") { model.applyPendingFill(.sequence) }.buttonStyle(.borderedProminent)
+                    }.controlSize(.small).padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(Color.accentColor.opacity(0.08))
+                }
                 Divider()
                 HStack {
                     Text("\(snapshot.rowCount) 行 · \(snapshot.columnCount) 列").font(.caption).foregroundStyle(.secondary)

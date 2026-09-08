@@ -247,8 +247,30 @@ enum WorkspaceSmokeTests {
             let up = NSEvent.mouseEvent(with: .leftMouseUp, location: targetPoint, modifierFlags: [], timestamp: 0,
                 windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 3, clickCount: 1, pressure: 1)!
             handleTable.mouseUp(with: up)
+            try require(handleEditor.pendingFill?.row == 2 && handleEditor.fillPreviewTarget?.row == 2,
+                        "填充拖拽后未保留目标预览")
+            handleEditor.applyPendingFill(.copy)
             try require(handleEditor.inputText(GridAddress(row: 1, column: 0)) == "fill seed" &&
                         handleEditor.inputText(GridAddress(row: 2, column: 0)) == "fill seed", "右下角填充柄拖拽失败")
+            handleEditor.select(row: 0, column: 0, extending: false)
+            handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
+            let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: handleWindow.windowNumber, context: nil, characters: "直接替换", charactersIgnoringModifiers: "直接替换",
+                isARepeat: false, keyCode: 0)!
+            handleTable.keyDown(with: directKey)
+            try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "单击后键盘直接替换单元格失败")
+            handleEditor.edit([GridAddress(row: 0, column: 0): "one"])
+            handleEditor.edit([GridAddress(row: 0, column: 0): "two"])
+            handleEditor.edit([GridAddress(row: 0, column: 0): "three"])
+            func sendUndo() {
+                let undo = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                    windowNumber: handleWindow.windowNumber, context: nil, characters: "z", charactersIgnoringModifiers: "z",
+                    isARepeat: false, keyCode: 6)!
+                handleTable.keyDown(with: undo); handleGrid.update()
+            }
+            sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "two", "第一次连续撤回失败")
+            sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "one", "第二次连续撤回失败")
+            sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "第三次连续撤回失败")
             handleWindow.orderOut(nil)
             let workspace = TableWorkspaceModel()
             let testWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
