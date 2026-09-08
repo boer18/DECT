@@ -1,0 +1,12 @@
+.DS_Store
+dist/
+.build/
+*.log
+.env
+.env.*
+*.xlsx
+*.xlsm
+*.xls
+*.key
+*.pem
+EXPERIENCE.md

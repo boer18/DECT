@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+  <key>CFBundleDisplayName</key><string>表格工具</string>
+  <key>CFBundleExecutable</key><string>OneClickTableExport</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
+  <key>CFBundleIconFiles</key>
+  <array>
+    <string>AppIcon.icns</string>
+  </array>
+  <key>CFBundleIdentifier</key><string>io.centurygames.one-click-table-export</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>表格工具</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.5.0</string>
+  <key>CFBundleVersion</key><string>20260907.7</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Local utility</string>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>

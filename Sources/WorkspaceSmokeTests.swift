@@ -1,0 +1,220 @@
+#if SMOKE_TEST
+import AppKit
+import Foundation
+
+enum WorkspaceSmokeTests {
+    @MainActor static func compareAndTabs(_ source: String) throws {
+        let manager = FileManager.default, sourceURL = URL(fileURLWithPath: source)
+        let original = try Data(contentsOf: sourceURL)
+        let root = manager.temporaryDirectory.appendingPathComponent("TableCompare-smoke-\(UUID().uuidString)")
+        try manager.createDirectory(at: root.appendingPathComponent("old/sub"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: root.appendingPathComponent("new/sub"), withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+        let old = root.appendingPathComponent("old/sub/Table.xlsx"), new = root.appendingPathComponent("new/sub/Table.xlsx")
+        try manager.copyItem(at: sourceURL, to: old); try manager.copyItem(at: sourceURL, to: new)
+        let snapshot = try GridWorkbookIO.read(new)
+        _ = try GridWorkbookIO.save(snapshot, changes: [GridAddress(row: 5, column: 3): "Version test {0} &", GridAddress(row: 6, column: 3): "Version second cell"])
+        let cancellation = ComparisonCancellation()
+        let result = FolderComparer.compare(path: "sub/Table.xlsx", oldURL: old, newURL: new, alignKeys: false, cancellation: cancellation)
+        try require(result.status == .changed && result.differences.count == 2, "XLSX 差异数量错误：\(result.status.rawValue) / \(result.differences.count) / \(result.note)")
+        let comparedSheet = result.newSheets.first!
+        let projection = ComparisonTableProjection(file: result, sheetName: comparedSheet.name)
+        try require(projection.kind(at: GridAddress(row: 5, column: 3)) == .modified &&
+                    projection.rowKind(5) == .modified && projection.columnKind(3) == .modified,
+                    "完整表格的单元格、行、列改动标记失败")
+        let checking = FolderComparisonModel()
+        checking.files = [result]; checking.selectedID = result.id; checking.markSelectedChecked()
+        try require(checking.checkedCount == 1 && checking.checkedProgress == 1 && checking.isChecked(result), "已检查进度记录失败")
+        let same = FolderComparer.compare(path: "same", oldURL: old, newURL: old, alignKeys: false, cancellation: cancellation)
+        try require(same.status == .same, "相同 XLSX 误报差异")
+        try "id,value\n1,\"a,b\"\n2,\"line\nnext\"\n".write(to: root.appendingPathComponent("old/values.csv"), atomically: true, encoding: .utf8)
+        try "id,value\n1,new\n2,\"line\nnext\"\n".write(to: root.appendingPathComponent("new/values.csv"), atomically: true, encoding: .utf8)
+        try "id\n1\n".write(to: root.appendingPathComponent("new/added.csv"), atomically: true, encoding: .utf8)
+        try "id\n2\n".write(to: root.appendingPathComponent("old/deleted.csv"), atomically: true, encoding: .utf8)
+        let a = try FolderComparer.catalog(root.appendingPathComponent("old")), b = try FolderComparer.catalog(root.appendingPathComponent("new"))
+        try require(a["sub/Table.xlsx"] != nil && b["sub/Table.xlsx"] != nil, "子目录匹配失败")
+        let csv = FolderComparer.compare(path: "values.csv", oldURL: a["values.csv"], newURL: b["values.csv"], alignKeys: false, cancellation: cancellation)
+        try require(csv.differences.count == 1 && csv.differences.first?.old == "a,b", "CSV 逗号和跨行字段比较失败")
+        let added = FolderComparer.compare(path: "added.csv", oldURL: nil, newURL: b["added.csv"], alignKeys: false, cancellation: cancellation)
+        let deleted = FolderComparer.compare(path: "deleted.csv", oldURL: a["deleted.csv"], newURL: nil, alignKeys: false, cancellation: cancellation)
+        try require(added.status == .added && deleted.status == .removed, "新增删除文件识别失败")
+        let addedProjection = ComparisonTableProjection(file: added, sheetName: added.newSheets.first!.name)
+        let deletedProjection = ComparisonTableProjection(file: deleted, sheetName: deleted.oldSheets.first!.name)
+        try require(addedProjection.kind(at: GridAddress(row: 0, column: 0)) == .added &&
+                    addedProjection.rowKind(0) == .added && addedProjection.columnKind(0) == .added &&
+                    deletedProjection.kind(at: GridAddress(row: 0, column: 0)) == .removed &&
+                    deletedProjection.rowKind(0) == .removed && deletedProjection.columnKind(0) == .removed,
+                    "新增删除表格的单元格、行、列颜色标记失败")
+        func sheet(_ reordered: Bool) -> ComparedSheet {
+            let rows = reordered ? [["id", "value"], ["2", "b"], ["1", "a"]] : [["id", "value"], ["1", "a"], ["2", "b"]]
+            var cells: [GridAddress: GridCell] = [:]
+            for (r, row) in rows.enumerated() { for (c, value) in row.enumerated() { cells[GridAddress(row: r, column: c)] = GridCell(text: value, formula: false) } }
+            return ComparedSheet(name: "data", cells: cells)
+        }
+        let aligned = FolderComparer.diff(sheet(false), sheet(true), alignKeys: true)
+        try require(aligned.0.isEmpty && aligned.1, "唯一 ID 行对齐失败")
+        let positional = FolderComparer.diff(sheet(false), sheet(true), alignKeys: false)
+        try require(positional.0.count == 4, "位置模式未反映重排")
+        let f1 = ComparedSheet(name: "formula", cells: [GridAddress(row: 0, column: 0): GridCell(text: "2", formula: true, formulaText: "1+1")])
+        let f2 = ComparedSheet(name: "formula", cells: [GridAddress(row: 0, column: 0): GridCell(text: "2", formula: true, formulaText: "2*1")])
+        try require(FolderComparer.diff(f1, f2, alignKeys: false).0.count == 1, "公式变化未识别")
+        cancellation.cancel()
+        try require(FolderComparer.compare(path: "cancel", oldURL: old, newURL: new, alignKeys: false, cancellation: cancellation).status == .failed, "停止未标记为未完成")
+        let final = try Data(contentsOf: sourceURL)
+        try require(final == original, "真实源表发生变化")
+        print("文件夹对比：子目录、全部工作表、2 格精准差异、相同文件、CSV 引号跨行、新增删除、ID 对齐、公式变化和停止通过；源表未改。")
+    }
+    static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw WorkspaceError(message: message) }
+    }
+    @MainActor static func run(_ files: [String]) throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("TableWorkspace-smoke-\(UUID().uuidString)")
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+        let special = [["<color=#abcdef>中文 & {0}</color>", "line\nnext", "tab\there"], ["\"quoted\"", "00123", "=literal"]]
+        try require(GridClipboard.decode(GridClipboard.encode(special)) == special, "跨行/Tab/引号剪贴板往返失败")
+        try require(GridClipboard.decode("a\tb\r\nc\td\r\n") == [["a", "b"], ["c", "d"]], "Excel CRLF 剪贴板失败")
+        print("剪贴板：矩形范围、换行、引号、Tab 和 Excel CRLF 通过")
+
+        for (index, path) in files.enumerated() {
+            let original = URL(fileURLWithPath: path), originalData = try Data(contentsOf: original)
+            let project = root.appendingPathComponent("Project-\(index)")
+            try manager.createDirectory(at: project, withIntermediateDirectories: true)
+            let file = project.appendingPathComponent("TbLanguage.xlsx")
+            try manager.copyItem(at: original, to: file)
+            let snapshot = try GridWorkbookIO.read(file)
+            let row = snapshot.rowCount + 2
+            var updates: [GridAddress: String] = [:]
+            for (r, values) in special.enumerated() { for (c, text) in values.enumerated() {
+                updates[GridAddress(row: row + r, column: c)] = text
+            } }
+            // Existing cells, missing interior cells, and end-of-sheet inserts.
+            for r in 5..<10 { for c in 3..<7 where snapshot.cells[GridAddress(row: r, column: c)]?.formula != true {
+                updates[GridAddress(row: r, column: c)] = "check \(r)/\(c) 😀 {1}\u{0001}"
+            } }
+            let revised = try GridWorkbookIO.save(snapshot, changes: updates)
+            for (address, text) in updates { try require(revised.cells[address]?.text == GridWorkbookIO.cleanText(text), "写入值不一致：\(address.reference)") }
+            for (address, cell) in snapshot.cells where updates[address] == nil {
+                try require(revised.cells[address]?.text == cell.text && revised.cells[address]?.formula == cell.formula, "非目标单元格变化：\(address.reference)")
+            }
+            let members = String(decoding: try GridWorkbookIO.capture("/usr/bin/unzip", ["-Z1", file.path]), as: UTF8.self).split(separator: "\n").map(String.init)
+            for member in members where !member.hasSuffix("/") && member != snapshot.sheet.archivePath {
+                let expected = try GridWorkbookIO.entry(member, in: original)
+                let actual = try GridWorkbookIO.entry(member, in: file)
+                try require(expected == actual, "非目标工作簿部件变化：\(member)")
+            }
+            _ = try GridWorkbookIO.capture("/usr/bin/unzip", ["-tq", file.path])
+            // Formula editing: the editor exposes the raw formula with a
+            // leading '=', and the writer stores the formula body in <f>.
+            let formulaFile = project.appendingPathComponent("Formula.xlsx")
+            try manager.copyItem(at: file, to: formulaFile)
+            let formulaBase = try GridWorkbookIO.read(formulaFile)
+            let formulaAddress = GridAddress(row: 0, column: 0)
+            var formulaCells = formulaBase.cells
+            let originalFormulaCell = formulaCells[formulaAddress]
+            formulaCells[formulaAddress] = GridCell(
+                text: originalFormulaCell?.text ?? "",
+                formula: true,
+                formulaText: "1+1",
+                valueKind: originalFormulaCell?.valueKind ?? "n")
+            let formulaSnapshot = GridSnapshot(
+                fileURL: formulaBase.fileURL,
+                fingerprint: formulaBase.fingerprint,
+                sheets: formulaBase.sheets,
+                sheet: formulaBase.sheet,
+                cells: formulaCells,
+                rowCount: formulaBase.rowCount,
+                columnCount: formulaBase.columnCount)
+            let formulaEditor = GridEditorModel(); formulaEditor.snapshot = formulaSnapshot
+            let formulaRegion = GridRegion(formulaEditor, rows: 0..<2, columns: 0..<2, header: true)
+            let formulaColumn = formulaRegion.table.tableColumns[0]
+            try require(formulaRegion.tableView(formulaRegion.table, objectValueFor: formulaColumn, row: 0) as? String == "=1+1", "选中公式格未显示公式")
+            formulaEditor.select(row: 1, column: 1, extending: false)
+            try require(formulaRegion.tableView(formulaRegion.table, objectValueFor: formulaColumn, row: 0) as? String == (originalFormulaCell?.text ?? ""), "未选中公式格应显示缓存结果")
+            try require(formulaEditor.inputText(formulaAddress) == "=1+1", "公式单元格未显示原始公式")
+            formulaEditor.edit([formulaAddress: "=SUM(1, 2)"])
+            try require(formulaEditor.changes[formulaAddress] == "=SUM(1, 2)", "公式单元格双击输入内容未进入编辑状态")
+            let formulaSaved = try GridWorkbookIO.save(formulaSnapshot, changes: formulaEditor.changes)
+            try require(formulaSaved.cells[formulaAddress]?.formula == true &&
+                        formulaSaved.cells[formulaAddress]?.formulaText == "SUM(1, 2)",
+                        "公式写回 XLSX 失败")
+            // A stale snapshot must never overwrite newer data.
+            var blocked = false
+            do { _ = try GridWorkbookIO.save(snapshot, changes: [GridAddress(row: 8, column: 3): "stale"]) }
+            catch { blocked = error.localizedDescription.contains("已被") }
+            try require(blocked, "未阻止旧快照覆盖新数据")
+            let editor = GridEditorModel(); editor.snapshot = revised
+            let address = GridAddress(row: 8, column: 3), old = editor.text(address)
+            editor.edit([address: "new"]); try require(editor.changes.count == 1, "单元格编辑失败")
+            editor.undo(); try require(editor.text(address) == old && editor.changes.isEmpty, "撤销失败")
+            editor.redo(); try require(editor.text(address) == "new", "重做失败")
+            editor.undo()
+            editor.selectRows(4, extending: false); editor.selectRows(6, extending: true)
+            try require(editor.rows == 4...6 && editor.columns.count == editor.usedColumnCount, "整行连选失败")
+            editor.selectColumns(2, extending: false); editor.selectColumns(4, extending: true)
+            try require(editor.columns == 2...4 && editor.rows.count == editor.usedRowCount, "整列连选失败")
+            let copied = GridClipboard.decode(GridClipboard.encode(editor.rows.map { r in editor.columns.map { c in editor.text(GridAddress(row: r, column: c)) } }))
+            try require(copied.count == editor.usedRowCount && copied[0].count == 3, "整列复制范围失败")
+            editor.frozenRows = 2; editor.frozenColumns = 2
+            let grid = FrozenGridView(editor)
+            grid.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+            grid.layoutSubtreeIfNeeded()
+            try require(grid.regions.count == 4 && grid.regions[0].range == 0..<2 && grid.regions[3].range.lowerBound == 2, "冻结区域行映射失败")
+            try require(grid.regions[3].table.dataColumn(0) == 2 && grid.regions[2].table.dataColumn(0) == -1, "冻结区域列映射失败")
+            let object = grid.regions[3].tableView(grid.regions[3].table, objectValueFor: grid.regions[3].table.tableColumns[0], row: 3) as? String
+            try require(object == editor.text(GridAddress(row: 5, column: 2)), "冻结后单元格坐标错误")
+            grid.regions[3].scroll.contentView.scroll(to: NSPoint(x: 100, y: 120))
+            grid.sync(from: 3)
+            try require(abs(grid.regions[1].scroll.contentView.bounds.origin.x - grid.regions[3].scroll.contentView.bounds.origin.x) < 1, "冻结顶部横向同步失败")
+            try require(abs(grid.regions[2].scroll.contentView.bounds.origin.y - grid.regions[3].scroll.contentView.bounds.origin.y) < 1, "冻结左侧纵向同步失败")
+            editor.frozenRows = 0; editor.frozenColumns = 0; grid.update()
+            try require(grid.regions.count == 1 && grid.regions[0].range.lowerBound == 0 &&
+                        grid.regions[0].table.dataColumn(0) == -1 &&
+                        grid.regions[0].table.dataColumn(1) == 0, "取消冻结后普通表格布局失败")
+            let workspace = TableWorkspaceModel()
+            let testWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            testWindow.contentView = grid
+            testWindow.makeKeyAndOrderFront(nil)
+            grid.layoutSubtreeIfNeeded()
+            let tableView = grid.regions[0].table
+            let rect = tableView.frameOfCell(atColumn: 2, row: 5)
+            let point = tableView.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let click = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: testWindow.windowNumber, context: nil, eventNumber: 1, clickCount: 2, pressure: 1)!
+            tableView.mouseDown(with: click)
+            grid.update()
+            try require(tableView.editedRow == 5 && tableView.currentEditor() != nil, "双击后刷新销毁了单元格编辑器")
+            tableView.currentEditor()?.string = "double-click edited"
+            testWindow.makeFirstResponder(nil)
+            try require(editor.inputText(GridAddress(row: 5, column: 1)) == "double-click edited", "单元格编辑提交失败")
+            editor.setZoom(1.5); grid.update()
+            try require(abs(grid.regions[0].scroll.magnification - 1.5) < 0.01, "表格缩放未生效")
+            editor.setZoom(1); grid.update()
+            testWindow.orderOut(nil)
+            print("实际双击事件、编辑器保留、文本提交、150% 缩放与重置通过")
+            try require(!workspace.split, "多表并排默认状态应为关闭")
+            workspace.split = false
+            func previewTable(_ suffix: String) -> ProjectTable {
+                ProjectTable(projectID: "test", projectDisplayPath: "test", fileURL: root.appendingPathComponent(suffix),
+                             relativeDataPath: suffix, byteCount: 0, modifiedAt: nil)
+            }
+            let first = previewTable("first.xlsx"), second = previewTable("second.xlsx"), third = previewTable("third.xlsx")
+            workspace.preview(first); workspace.preview(second)
+            try require(workspace.openIDs == [second.id], "预览模式重复开表")
+            workspace.editor(second.id)?.changes = [GridAddress(row: 0, column: 0): "unsaved"]
+            workspace.preview(third)
+            try require(workspace.openIDs == [second.id, third.id], "预览覆盖未保存编辑")
+            print("冻结坐标、滚动同步、取消冻结、整行整列选择复制、预览复用与未保存保护通过")
+            let draft = SavedTranslationDraft(key: "test_key", originals: ["en": ""], translations: ["en": "draft"])
+            try TranslationDraftStore.save([draft], for: file)
+            try require(TranslationDraftStore.load(for: file).first?.translations["en"] == "draft", "翻译草稿恢复失败")
+            try TranslationDraftStore.save([], for: file)
+            try require(TranslationDraftStore.load(for: file).isEmpty, "保存后草稿未清除")
+            let finalOriginal = try Data(contentsOf: original)
+            try require(finalOriginal == originalData, "真实源表被修改")
+            print("\(original.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().lastPathComponent)：\(updates.count) 格写入 / 非目标格与工作簿部件保留 / ZIP 完整 / 外部变化拦截 / 撤销重做 / 草稿恢复通过")
+        }
+        print("工作区回归全部通过；所有项目源表未改。")
+    }
+}
+#endif
