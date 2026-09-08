@@ -247,11 +247,18 @@ enum WorkspaceSmokeTests {
             let up = NSEvent.mouseEvent(with: .leftMouseUp, location: targetPoint, modifierFlags: [], timestamp: 0,
                 windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 3, clickCount: 1, pressure: 1)!
             handleTable.mouseUp(with: up)
-            try require(handleEditor.pendingFill?.row == 2 && handleEditor.fillPreviewTarget?.row == 2,
-                        "填充拖拽后未保留目标预览")
-            handleEditor.applyPendingFill(.copy)
+            handleGrid.layoutSubtreeIfNeeded(); handleGrid.update()
+            try require(handleEditor.lastFill?.row == 2 && handleEditor.lastFill?.column == 0 &&
+                        handleEditor.fillPreviewTarget == nil,
+                        "填充拖拽后未自动完成并记录目标")
+            try require(handleEditor.lastFill?.mode == .copy && handleGrid.fillOptionsButton?.isHidden == false,
+                        "普通文本未自动判断为复制，或填充选项按钮未显示")
             try require(handleEditor.inputText(GridAddress(row: 1, column: 0)) == "fill seed" &&
                         handleEditor.inputText(GridAddress(row: 2, column: 0)) == "fill seed", "右下角填充柄拖拽失败")
+            handleEditor.reapplyLastFill(.sequence)
+            try require(handleEditor.lastFill?.mode == .sequence &&
+                        handleEditor.inputText(GridAddress(row: 2, column: 0)) == "fill seed",
+                        "展开填充选项后切换模式失败")
             handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
             let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,

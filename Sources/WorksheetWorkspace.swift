@@ -46,10 +46,13 @@ enum GridFillMode: Equatable {
     case copy
     case sequence
 }
-struct GridFillRequest: Identifiable {
+struct GridFillRecord: Identifiable {
     let id = UUID()
+    let sourceRows: ClosedRange<Int>
+    let sourceColumns: ClosedRange<Int>
     let row: Int
     let column: Int
+    let mode: GridFillMode
 }
 struct WorkspaceError: LocalizedError {
     let message: String
@@ -309,7 +312,7 @@ final class GridEditorModel: ObservableObject {
     @Published var frozenRows = 0
     @Published var frozenColumns = 0
     @Published var showingFullContent = false
-    @Published var pendingFill: GridFillRequest?
+    @Published var lastFill: GridFillRecord?
     @Published var zoom: CGFloat = 1
     var fillPreviewTarget: GridAddress?
     func setZoom(_ value: CGFloat) { zoom = min(2.5, max(0.5, value)); revision += 1 }
@@ -455,7 +458,7 @@ final class GridEditorModel: ObservableObject {
                 switch result {
                 case .success(let value):
                     self.snapshot = value; self.history = []; self.redoHistory = []; self.formulaAddresses = []
-                    self.pendingFill = nil; self.fillPreviewTarget = nil
+                    self.lastFill = nil; self.fillPreviewTarget = nil
                     self.observedStamp = Self.stamp(value.fileURL)
                     self.anchor = GridAddress(row: 0, column: 0); self.extent = self.anchor; self.revision += 1
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -465,6 +468,7 @@ final class GridEditorModel: ObservableObject {
     }
     func select(row: Int, column: Int, extending: Bool) {
         axisSelection = nil
+        lastFill = nil; fillPreviewTarget = nil
         let address = GridAddress(row: max(0, min(rowCount - 1, row)), column: max(0, min(columnCount - 1, column)))
         if !extending { anchor = address }; extent = address; revision += 1
     }
@@ -476,6 +480,7 @@ final class GridEditorModel: ObservableObject {
                 (newFormulaAddresses.contains(address) && !formulaAddresses.contains(address) && snapshot?.cells[address]?.formula != true)
         }
         guard hasChange else { return }
+        lastFill = nil; fillPreviewTarget = nil
         history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
         if history.count > 50 { history.removeFirst() }
         redoHistory = []
@@ -589,30 +594,49 @@ final class GridEditorModel: ObservableObject {
         }
         return nil
     }
-    func queueFill(to targetRow: Int, targetColumn: Int) {
-        guard !isBusy else { return }
-        fillPreviewTarget = GridAddress(row: targetRow, column: targetColumn)
-        pendingFill = GridFillRequest(row: targetRow, column: targetColumn)
-        message = nil; isError = false
+    private func automaticFillMode(rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> GridFillMode {
+        if sourceRows.contains(where: { row in sourceColumns.contains(where: { isFormula(GridAddress(row: row, column: $0)) }) }) {
+            return .sequence
+        }
+        let probe = GridAddress(row: sourceRows.upperBound + 1, column: sourceColumns.upperBound)
+        let horizontalProbe = GridAddress(row: sourceRows.upperBound, column: sourceColumns.upperBound + 1)
+        return sequenceValue(at: probe, rows: sourceRows, columns: sourceColumns) != nil ||
+            sequenceValue(at: horizontalProbe, rows: sourceRows, columns: sourceColumns) != nil ? .sequence : .copy
     }
-    func applyPendingFill(_ mode: GridFillMode) {
-        guard let request = pendingFill else { return }
-        pendingFill = nil; fillPreviewTarget = nil; revision += 1
-        fillSelection(to: request.row, targetColumn: request.column, mode: mode)
+    @discardableResult
+    func fillFromHandle(to targetRow: Int, targetColumn: Int) -> Bool {
+        let sourceRows = rows, sourceColumns = columns
+        let mode = automaticFillMode(rows: sourceRows, columns: sourceColumns)
+        let didFill = fillSelection(to: targetRow, targetColumn: targetColumn, mode: mode)
+        if didFill {
+            lastFill = GridFillRecord(sourceRows: sourceRows, sourceColumns: sourceColumns,
+                                      row: targetRow, column: targetColumn, mode: mode)
+        }
+        return didFill
     }
-    func cancelPendingFill() {
-        pendingFill = nil; fillPreviewTarget = nil; revision += 1
+    func reapplyLastFill(_ mode: GridFillMode) {
+        guard let record = lastFill, !isBusy, !history.isEmpty else { return }
+        lastFill = nil; fillPreviewTarget = nil
+        undo()
+        anchor = GridAddress(row: record.sourceRows.lowerBound, column: record.sourceColumns.lowerBound)
+        extent = GridAddress(row: record.sourceRows.upperBound, column: record.sourceColumns.upperBound)
+        guard fillSelection(to: record.row, targetColumn: record.column, mode: mode) else { return }
+        lastFill = GridFillRecord(sourceRows: record.sourceRows, sourceColumns: record.sourceColumns,
+                                  row: record.row, column: record.column, mode: mode)
     }
-    func fillSelection(to targetRow: Int, targetColumn: Int, mode: GridFillMode = .sequence) {
-        guard !isBusy, snapshot != nil else { return }
+    func cancelLastFillOptions() {
+        lastFill = nil; fillPreviewTarget = nil; revision += 1
+    }
+    func fillSelection(to targetRow: Int, targetColumn: Int, mode: GridFillMode = .sequence) -> Bool {
+        guard !isBusy, snapshot != nil else { return false }
         let sourceRows = rows, sourceColumns = columns
         let endRow = max(sourceRows.upperBound, min(rowCount - 1, targetRow))
         let endColumn = max(sourceColumns.upperBound, min(columnCount - 1, targetColumn))
-        guard endRow > sourceRows.upperBound || endColumn > sourceColumns.upperBound else { return }
+        guard endRow > sourceRows.upperBound || endColumn > sourceColumns.upperBound else { return false }
         let total = (endRow - sourceRows.lowerBound + 1) * (endColumn - sourceColumns.lowerBound + 1)
             - sourceRows.count * sourceColumns.count
         guard total <= 50_000 else {
-            message = "填充范围过大，单次最多填充 50,000 个单元格。"; isError = true; return
+            message = "填充范围过大，单次最多填充 50,000 个单元格。"; isError = true; return false
         }
         var updates: [GridAddress: String] = [:], formulas: Set<GridAddress> = []
         for row in sourceRows.lowerBound...endRow {
@@ -635,10 +659,11 @@ final class GridEditorModel: ObservableObject {
             }
         }
         edit(updates, formulaAddresses: formulas)
-        guard !updates.isEmpty, !isError else { return }
+        guard !updates.isEmpty, !isError else { return false }
         anchor = sourceRows.lowerBound <= endRow ? GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound) : anchor
         extent = GridAddress(row: endRow, column: endColumn)
         revision += 1
+        return true
     }
     func copy() {
         let values = rows.map { row in columns.map { inputText(GridAddress(row: row, column: $0)) } }
@@ -665,12 +690,12 @@ final class GridEditorModel: ObservableObject {
     func undo() {
         guard let previous = history.popLast(), !isBusy else { return }
         redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
-        changes = previous.changes; formulaAddresses = previous.formulaAddresses; revision += 1
+        changes = previous.changes; formulaAddresses = previous.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
     }
     func redo() {
         guard let next = redoHistory.popLast(), !isBusy else { return }
         history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
-        changes = next.changes; formulaAddresses = next.formulaAddresses; revision += 1
+        changes = next.changes; formulaAddresses = next.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
     }
     func save(afterSave: (() -> Void)? = nil) {
         guard !isBusy, let snapshot else { return }
@@ -684,7 +709,7 @@ final class GridEditorModel: ObservableObject {
                 switch result {
                 case .success(let saved):
                     self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []
-                    self.pendingFill = nil; self.fillPreviewTarget = nil; self.revision += 1
+                    self.lastFill = nil; self.fillPreviewTarget = nil; self.revision += 1
                     self.observedStamp = Self.stamp(saved.fileURL)
                     self.message = "已保存 \(updates.count) 个单元格"; afterSave?()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -785,7 +810,7 @@ final class CellGridTable: NSTableView {
     }
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
-        guard let editor, !editor.isBusy, editor.pendingFill == nil else { return }
+        guard let editor, !editor.isBusy else { return }
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), localColumn = column(at: p)
         if let handle = fillHandleRect(), handle.insetBy(dx: -5, dy: -5).contains(p) {
             editor.onActivate?()
@@ -821,8 +846,9 @@ final class CellGridTable: NSTableView {
             updateFillTarget(with: event)
             let target = editor?.fillPreviewTarget
             filling = false
-            if let target { editor?.queueFill(to: target.row, targetColumn: target.column) }
+            if let target { editor?.fillFromHandle(to: target.row, targetColumn: target.column) }
             else { editor?.fillPreviewTarget = nil; invalidateFillPreview() }
+            invalidateFillPreview()
             return
         }
         super.mouseUp(with: event)
@@ -830,7 +856,7 @@ final class CellGridTable: NSTableView {
     @objc func copy(_ sender: Any?) { editor?.copy() }
     @objc func paste(_ sender: Any?) { editor?.paste() }
     override func keyDown(with event: NSEvent) {
-        guard let editor, !editor.isBusy, editor.pendingFill == nil else { return }
+        guard let editor, !editor.isBusy else { return }
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "c": editor.copy()
@@ -881,7 +907,7 @@ final class GridColumnHeader: NSTableHeaderView {
     private var resizing = false
     override func mouseDown(with event: NSEvent) {
         guard let table = tableView as? CellGridTable, let editor = table.editor,
-              !editor.isBusy, editor.pendingFill == nil else { return }
+              !editor.isBusy else { return }
         let point = convert(event.locationInWindow, from: nil)
         let local = column(at: point)
         resizing = local >= 0 && abs(headerRect(ofColumn: local).maxX - point.x) < 5
@@ -896,6 +922,62 @@ final class GridColumnHeader: NSTableHeaderView {
         guard let table = tableView as? CellGridTable else { return }
         let c = table.dataColumn(column(at: convert(event.locationInWindow, from: nil)))
         if c >= 0 { table.editor?.selectColumns(c, extending: true) }
+    }
+}
+
+@MainActor
+final class FillOptionsViewController: NSViewController {
+    private let model: GridEditorModel
+    private let onFinish: () -> Void
+    private let copyButton: NSButton
+    private let sequenceButton: NSButton
+
+    init(model: GridEditorModel, onFinish: @escaping () -> Void) {
+        self.model = model
+        self.onFinish = onFinish
+        copyButton = NSButton(title: "复制单元格(C)", target: nil, action: nil)
+        sequenceButton = NSButton(title: "以序列方式填充(S)", target: nil, action: nil)
+        super.init(nibName: nil, bundle: nil)
+        copyButton.setButtonType(.radio)
+        sequenceButton.setButtonType(.radio)
+        copyButton.target = self; copyButton.action = #selector(selectCopy)
+        sequenceButton.target = self; sequenceButton.action = #selector(selectSequence)
+        copyButton.controlSize = .small; sequenceButton.controlSize = .small
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func loadView() {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 76))
+        let stack = NSStackView(views: [copyButton, sequenceButton])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+        ])
+        view = root
+        preferredContentSize = root.frame.size
+        switch model.lastFill?.mode {
+        case .copy: copyButton.state = .on; sequenceButton.state = .off
+        case .sequence: copyButton.state = .off; sequenceButton.state = .on
+        case nil: copyButton.state = .off; sequenceButton.state = .off
+        }
+    }
+
+    @objc private func selectCopy() {
+        model.reapplyLastFill(.copy)
+        onFinish()
+    }
+
+    @objc private func selectSequence() {
+        model.reapplyLastFill(.sequence)
+        onFinish()
     }
 }
 
@@ -914,14 +996,97 @@ final class FrozenGridView: NSView {
     var signature = ""
     var syncing = false
     var lastRevision = -1
+    var fillOptionsButton: NSButton?
+    var fillOptionsPopover: NSPopover?
+    private var fillOptionsObservation: AnyCancellable?
     override var isFlipped: Bool { true }
     init(_ model: GridEditorModel) {
         self.model = model
         super.init(frame: .zero)
+        let image = NSImage(systemSymbolName: "arrow.down.right.square",
+                            accessibilityDescription: "填充选项") ?? NSImage(size: NSSize(width: 16, height: 16))
+        let button = NSButton(image: image,
+                              target: nil, action: nil)
+        button.setButtonType(.momentaryPushIn)
+        button.bezelStyle = NSButton.BezelStyle.roundRect
+        button.controlSize = NSControl.ControlSize.small
+        button.imagePosition = NSControl.ImagePosition.imageOnly
+        button.imageScaling = NSImageScaling.scaleProportionallyDown
+        button.contentTintColor = NSColor.secondaryLabelColor
+        button.toolTip = "填充选项"
+        button.setAccessibilityLabel("填充选项")
+        button.target = self
+        button.action = #selector(toggleFillOptions)
+        button.frame = NSRect(x: 0, y: 0, width: 30, height: 22)
+        button.isHidden = true
+        fillOptionsButton = button
+        addSubview(button)
+        fillOptionsObservation = model.$lastFill.sink { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.needsLayout = true
+                self.updateFillOptionsButton()
+            }
+        }
         update()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    deinit { observations.forEach { NotificationCenter.default.removeObserver($0) } }
+    deinit {
+        observations.forEach { NotificationCenter.default.removeObserver($0) }
+        fillOptionsObservation?.cancel()
+    }
+
+    private func selectedFillTable() -> CellGridTable? {
+        guard model.lastFill != nil else { return nil }
+        return regions.first(where: {
+            $0.range.contains(model.rows.upperBound) &&
+            $0.table.tableColumns.contains { $0.identifier.rawValue == String(model.columns.upperBound) }
+        })?.table
+    }
+
+    func updateFillOptionsButton() {
+        guard let button = fillOptionsButton,
+              model.lastFill != nil,
+              let table = selectedFillTable(),
+              let handle = table.fillHandleRect(),
+              bounds.width > 0, bounds.height > 0 else {
+            fillOptionsPopover?.performClose(nil)
+            fillOptionsPopover = nil
+            fillOptionsButton?.isHidden = true
+            return
+        }
+        let handleRect = table.convert(handle, to: self)
+        let size = NSSize(width: 30, height: 22)
+        var x = handleRect.maxX + 4
+        var y = handleRect.minY - 4
+        if x + size.width > bounds.width { x = handleRect.minX - size.width - 4 }
+        if x < 0 { x = max(0, min(bounds.width - size.width, handleRect.midX - size.width / 2)) }
+        if y + size.height > bounds.height { y = handleRect.maxY - size.height + 4 }
+        y = max(0, min(bounds.height - size.height, y))
+        button.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
+        button.isHidden = false
+        addSubview(button, positioned: .above, relativeTo: nil)
+    }
+
+    @objc private func toggleFillOptions() {
+        guard let button = fillOptionsButton, model.lastFill != nil else { return }
+        if let popover = fillOptionsPopover, popover.isShown {
+            popover.performClose(nil)
+            fillOptionsPopover = nil
+            return
+        }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = FillOptionsViewController(model: model) { [weak self, weak popover] in
+            popover?.performClose(nil)
+            self?.fillOptionsPopover = nil
+            self?.needsLayout = true
+        }
+        fillOptionsPopover = popover
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+    }
+
     func update() {
         // Selection publishes a SwiftUI update immediately after double-click.
         // Reloading here would destroy AppKit's newly created field editor.
@@ -950,13 +1115,15 @@ final class FrozenGridView: NSView {
             }
             for (index, region) in regions.enumerated() {
                 addSubview(region.scroll)
-                if regions.count == 4 {
-                    region.scroll.contentView.postsBoundsChangedNotifications = true
-                    observations.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
-                        object: region.scroll.contentView, queue: .main) { [weak self] _ in
-                        MainActor.assumeIsolated { self?.sync(from: index) }
-                    })
-                }
+                region.scroll.contentView.postsBoundsChangedNotifications = true
+                observations.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                    object: region.scroll.contentView, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.updateFillOptionsButton()
+                        if self.regions.count == 4 { self.sync(from: index) }
+                    }
+                })
             }
             if regions.count == 1 {
                 regions[0].scroll.hasHorizontalScroller = true
@@ -991,11 +1158,13 @@ final class FrozenGridView: NSView {
             }
             needsLayout = true
         }
+        updateFillOptionsButton()
     }
     override func layout() {
         super.layout()
         if regions.count == 1 {
             regions[0].scroll.frame = bounds
+            updateFillOptionsButton()
             return
         }
         guard regions.count == 4 else { return }
@@ -1009,6 +1178,7 @@ final class FrozenGridView: NSView {
         regions[2].scroll.frame = NSRect(x: 0, y: h, width: w, height: max(0, bounds.height-h))
         regions[3].scroll.frame = NSRect(x: w, y: h, width: max(0, bounds.width-w), height: max(0, bounds.height-h))
         regions[0].scroll.isHidden = h == 0; regions[1].scroll.isHidden = h == 0
+        updateFillOptionsButton()
     }
     func sync(from index: Int) {
         guard !syncing, regions.count == 4 else { return }
@@ -1193,18 +1363,6 @@ struct GridEditorPane: View {
                     Button("重置大小") { commit(); model.setZoom(1) }
                 }.controlSize(.small).padding(.horizontal, 12).padding(.vertical, 5)
                 CellGrid(model: model)
-                if let request = model.pendingFill {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.down.right.square").foregroundStyle(.tint)
-                        Text("填充到 \(GridAddress(row: request.row, column: request.column).reference)")
-                            .font(.caption.weight(.medium))
-                        Spacer()
-                        Button("取消") { model.cancelPendingFill() }
-                        Button("复制单元格") { model.applyPendingFill(.copy) }
-                        Button("序列填充") { model.applyPendingFill(.sequence) }.buttonStyle(.borderedProminent)
-                    }.controlSize(.small).padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Color.accentColor.opacity(0.08))
-                }
                 Divider()
                 HStack {
                     Text("\(snapshot.rowCount) 行 · \(snapshot.columnCount) 列").font(.caption).foregroundStyle(.secondary)
