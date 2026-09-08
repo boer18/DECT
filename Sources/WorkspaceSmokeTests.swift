@@ -4,6 +4,23 @@ import Foundation
 
 enum WorkspaceSmokeTests {
     @MainActor static func compareAndTabs(_ source: String) throws {
+        var originalCells: [GridAddress: GridCell] = [:], shiftedCells: [GridAddress: GridCell] = [:]
+        for row in 0..<3000 {
+            for column in 0..<4 {
+                let value = GridCell(text: row == 0 ? "field\(column)" : "value\(row)-\(column)", formula: false)
+                originalCells[GridAddress(row: row, column: column)] = value
+                if row != 120 {
+                    shiftedCells[GridAddress(row: row < 120 ? row : row - 1, column: column + 1)] = value
+                }
+            }
+        }
+        shiftedCells[GridAddress(row: 0, column: 0)] = GridCell(text: "new field", formula: false)
+        let alignment = TableAlignment.align(ComparedSheet(name: "test", cells: originalCells), ComparedSheet(name: "test", cells: shiftedCells))
+        let structural = FolderComparer.diff(alignment.0, alignment.1, alignKeys: false).0
+        try require(structural.count == 5 && structural.filter { $0.status == .added }.count == 1 && structural.filter { $0.status == .removed }.count == 4,
+                    "3000 行表新增列并删除行导致相同内容误报")
+        let reverse = TableAlignment.align(ComparedSheet(name: "test", cells: shiftedCells), ComparedSheet(name: "test", cells: originalCells))
+        try require(FolderComparer.diff(reverse.0, reverse.1, alignKeys: false).0.count == 5, "反向增删对齐失败")
         let manager = FileManager.default, sourceURL = URL(fileURLWithPath: source)
         let original = try Data(contentsOf: sourceURL)
         let root = manager.temporaryDirectory.appendingPathComponent("TableCompare-smoke-\(UUID().uuidString)")

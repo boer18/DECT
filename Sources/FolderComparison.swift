@@ -281,8 +281,15 @@ enum FolderComparer {
     static func compare(path: String, oldURL: URL?, newURL: URL?, alignKeys: Bool, cancellation: ComparisonCancellation) -> ComparedFile {
         do {
             try cancellation.check()
-            let old = try oldURL.map { try readSheets($0, cancellation: cancellation) } ?? []
-            let new = try newURL.map { try readSheets($0, cancellation: cancellation) } ?? []
+            var old = try oldURL.map { try readSheets($0, cancellation: cancellation) } ?? []
+            var new = try newURL.map { try readSheets($0, cancellation: cancellation) } ?? []
+            for i in old.indices {
+                try cancellation.check()
+                if let j = new.firstIndex(where: { $0.name == old[i].name }) {
+                    let aligned = TableAlignment.align(old[i], new[j])
+                    old[i] = aligned.0; new[j] = aligned.1
+                }
+            }
             var differences: [CellDifference] = [], notes: [String] = []
             for name in Set(old.map(\.name)).union(new.map(\.name)).sorted() {
                 try cancellation.check()
@@ -1059,20 +1066,22 @@ struct FolderComparisonView: View {
             HStack(spacing: 12) {
                 Picker("对比来源", selection: $model.sourceMode) {
                     ForEach(ComparisonSourceMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }.pickerStyle(.segmented).frame(width: 220).disabled(model.isRunning)
+                }.labelsHidden().pickerStyle(.segmented).frame(width: 220).fixedSize().disabled(model.isRunning)
+                Spacer(minLength: 4)
+                Button(model.isRunning ? "对比中…" : "开始对比") { model.run() }
+                    .buttonStyle(.borderedProminent).disabled(model.isRunning || !model.canRun)
+                if model.isRunning { Button("停止") { model.stop() } }
+            }.padding(.horizontal, 16).padding(.top, 12)
+            HStack(spacing: 12) {
                 if model.sourceMode == .folders {
                     folder(old: true); Image(systemName: "arrow.right").foregroundStyle(.secondary); folder(old: false)
                 } else {
                     gitSelector
                 }
-                Spacer(minLength: 4)
-                Button(model.isRunning ? "对比中…" : "开始对比") { model.run() }
-                    .buttonStyle(.borderedProminent).disabled(model.isRunning || !model.canRun)
-                if model.isRunning { Button("停止") { model.stop() } }
             }.padding(16)
             HStack {
                 Toggle("仅看差异", isOn: $model.onlyDifferences).toggleStyle(.checkbox)
-                Toggle("按唯一 ID/key 对齐行", isOn: $model.alignKeys).toggleStyle(.checkbox).disabled(model.isRunning).help("默认按位置逐格比较；启用后，具有唯一 ID/key 的工作表忽略数据行重排。更改后需重新对比。")
+                Toggle("按唯一 ID/key 对齐行", isOn: $model.alignKeys).toggleStyle(.checkbox).disabled(model.isRunning).help("默认按内容识别行列增删；启用后进一步按唯一 ID/key 匹配重排的数据行。更改后需重新对比。")
                 Spacer()
                 Label("已检查 \(model.checkedCount)/\(model.reviewFiles.count)", systemImage: model.checkedCount == model.reviewFiles.count && !model.reviewFiles.isEmpty ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(model.checkedCount == model.reviewFiles.count && !model.reviewFiles.isEmpty ? .green : .secondary)
@@ -1141,17 +1150,17 @@ struct FolderComparisonView: View {
                     .disabled(model.isLoadingGitHistory || model.gitBranches.isEmpty)
                 Picker("定位", selection: $model.gitCommitSelectionMode) {
                     ForEach(GitCommitSelectionMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }.frame(width: 90)
+                }.labelsHidden().pickerStyle(.segmented).frame(width: 160).fixedSize()
                 if model.gitCommitSelectionMode == .commit {
                     Picker("提交", selection: $model.selectedGitCommitHash) {
                         if model.gitCommits.isEmpty { Text("暂无提交").tag("") }
                         ForEach(model.gitCommits) { commit in
-                            Text("\(commit.shortHash) · \(commit.subject)").tag(commit.hash)
+                            Text("\(commit.subject) · \(commit.shortHash) · \(commit.date.formatted(date: .numeric, time: .shortened))").tag(commit.hash)
                         }
                     }.frame(minWidth: 240, maxWidth: 360)
                 } else {
                     DatePicker("时间点", selection: $model.gitDate, displayedComponents: [.date, .hourAndMinute])
-                        .labelsHidden().frame(width: 170)
+                        .datePickerStyle(.field).labelsHidden().fixedSize()
                 }
             }
             if let commit = model.selectedGitCommit {
@@ -1205,7 +1214,7 @@ struct FolderComparisonView: View {
                     Label("删除", systemImage: "minus.square.fill").foregroundStyle(.red)
                     Label("新增", systemImage: "plus.square.fill").foregroundStyle(.green)
                     Label("修改", systemImage: "square.fill").foregroundStyle(.purple)
-                    Text("修改单元格显示：旧值 ↓ 新值；行号格和列号格会整格着色").font(.caption).foregroundStyle(.secondary)
+                    Text("内容已对齐；行列号为对齐视图位置。修改显示旧值 ↓ 新值").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     if let index = model.selectedIndex { Text("文件 \(index + 1)/\(model.files.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 }.font(.caption)
