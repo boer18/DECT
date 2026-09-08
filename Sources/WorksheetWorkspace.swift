@@ -1404,7 +1404,7 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
             definition.dataCell = cell; table.addTableColumn(definition)
         }
         scroll.documentView = table
-        scroll.drawsBackground = true; scroll.backgroundColor = .white
+        scroll.drawsBackground = true; scroll.backgroundColor = .textBackgroundColor
         scroll.horizontalScrollElasticity = .none; scroll.verticalScrollElasticity = .none
         table.reloadData()
     }

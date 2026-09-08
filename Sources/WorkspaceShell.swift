@@ -196,9 +196,9 @@ struct TableWorkspaceView: View {
                             Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([table.fileURL]) }
                         }
                 }
-            }.listStyle(.plain).scrollContentBackground(.hidden).background(Color.white).frame(maxHeight: .infinity)
+            }.listStyle(.plain).scrollContentBackground(.hidden).background(Color(nsColor: .textBackgroundColor)).frame(maxHeight: .infinity)
             Text("单击编辑 · 双击外部打开 · 右键收藏").font(.caption2).foregroundStyle(.secondary).padding(10)
-        }.background(Color.white)
+        }.background(Color(nsColor: .textBackgroundColor))
     }
     private var tabBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
