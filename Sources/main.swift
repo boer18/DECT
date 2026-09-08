@@ -2861,6 +2861,8 @@ struct LanguageReaderSmokeTest {
     @MainActor static func main() {
         let paths = Array(CommandLine.arguments.dropFirst())
         if paths.first == "--updater-smoke" {
+            do { try UpdaterSmokeTests.run() }
+            catch { fputs("更新回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             precondition(AppUpdater.isNewer("v1.6.0", than: "1.5.0"))
             precondition(AppUpdater.isNewer("v1.10.0", than: "1.9.0"))
             precondition(!AppUpdater.isNewer("v1.6.0", than: "1.6.0"))

@@ -238,6 +238,9 @@ struct TableWorkspaceView: View {
 
 final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
     static var hasUnsavedWork: (() -> Bool)?
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UpdateInstaller.acknowledgeLaunch()
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard Self.hasUnsavedWork?() == true else { return .terminateNow }
         let alert = NSAlert()

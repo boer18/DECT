@@ -2,6 +2,66 @@ import AppKit
 import CryptoKit
 import SwiftUI
 
+enum UpdateInstaller {
+    // Arguments, never interpolated shell source, carry all user-controlled paths.
+    static let script = """
+    #!/bin/sh
+    parent="$1"; destination="$2"; staged="$3"; previous="$4"; root="$5"
+    exec >>"$root/install.log" 2>&1
+    echo "Waiting for application exit"
+    touch "$root/ready"
+    count=0
+    while /bin/kill -0 "$parent" 2>/dev/null; do
+      count=$((count + 1))
+      if [ "$count" -ge 120 ]; then
+        echo "Cancelled: application did not exit; no files replaced"
+        exit 1
+      fi
+      /bin/sleep 1
+    done
+    if ! /bin/mv "$destination" "$previous"; then
+      echo "Failed to preserve previous application"
+      /usr/bin/open -a TextEdit "$root/install.log"
+      exit 1
+    fi
+    if ! /bin/mv "$staged" "$destination"; then
+      echo "Replacement failed; restoring previous application"
+      /bin/mv "$previous" "$destination"
+      /usr/bin/open -n -a "$destination"
+      /usr/bin/open -a TextEdit "$root/install.log"
+      exit 1
+    fi
+    echo "Installed; launching explicit new application instance"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$destination"
+    if ! /usr/bin/open -n -a "$destination" --args --dect-update-complete "$root"; then
+      echo "Launch failed. Please open the application manually."
+      /usr/bin/open -a TextEdit "$root/install.log"
+      exit 1
+    fi
+    count=0
+    while [ ! -f "$root/launched" ]; do
+      count=$((count + 1))
+      if [ "$count" -ge 30 ]; then
+        echo "No startup confirmation. Please open the application manually."
+        /usr/bin/open -a TextEdit "$root/install.log"
+        exit 1
+      fi
+      /bin/sleep 1
+    done
+    echo "Restart confirmed"
+    """
+
+    static func acknowledgeLaunch(arguments args: [String] = CommandLine.arguments) {
+        guard let index = args.firstIndex(of: "--dect-update-complete"), index + 1 < args.count else { return }
+        let root = URL(fileURLWithPath: args[index + 1]).standardizedFileURL
+        let temp = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        guard root.deletingLastPathComponent().resolvingSymlinksInPath() == temp,
+              root.lastPathComponent.hasPrefix("DECT-Update-"),
+              FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path) else { return }
+        try? Bundle.main.bundleURL.path.write(to: root.appendingPathComponent("launched"), atomically: true, encoding: .utf8)
+    }
+}
+
 struct PublishedRelease: Decodable {
     struct Asset: Decodable {
         let name: String
@@ -120,33 +180,29 @@ final class AppUpdater: ObservableObject {
             guard mayRestart() else { status = "下载完成，但当前有未保存内容或任务。请处理完成后再次安装。"; return }
             // Stage on the destination volume so replacement is a rename.
             let staged = destination.deletingLastPathComponent().appendingPathComponent(".DECT-update-\(UUID().uuidString).app")
-            let previous = destination.deletingLastPathComponent().appendingPathComponent(".DECT-previous-\(UUID().uuidString).app")
+            let previous = destination.deletingLastPathComponent().appendingPathComponent(".DECT-previous-\(UUID().uuidString).backup")
             try manager.copyItem(at: candidate, to: staged)
             let script = root.appendingPathComponent("install.sh")
-            let contents = """
-            #!/bin/sh
-            parent="$1"; destination="$2"; staged="$3"; previous="$4"
-            count=0
-            while /bin/kill -0 "$parent" 2>/dev/null; do
-              count=$((count + 1))
-              if [ "$count" -ge 120 ]; then exit 1; fi
-              /bin/sleep 1
-            done
-            if /bin/mv "$destination" "$previous"; then
-              if /bin/mv "$staged" "$destination"; then
-                /usr/bin/open "$destination"
-              else
-                /bin/mv "$previous" "$destination"
-                /usr/bin/open "$destination"
-              fi
-            fi
-            """
-            try contents.write(to: script, atomically: true, encoding: .utf8)
+            try UpdateInstaller.script.write(to: script, atomically: true, encoding: .utf8)
             let helper = Process()
             helper.executableURL = URL(fileURLWithPath: "/bin/sh")
-            helper.arguments = [script.path, String(ProcessInfo.processInfo.processIdentifier), destination.path, staged.path, previous.path]
+            helper.arguments = [script.path, String(ProcessInfo.processInfo.processIdentifier), destination.path, staged.path, previous.path, root.path]
             helper.standardInput = FileHandle.nullDevice; helper.standardOutput = FileHandle.nullDevice; helper.standardError = FileHandle.nullDevice
-            try helper.run(); handedOff = true
+            try helper.run()
+            for _ in 0..<40 {
+                if manager.fileExists(atPath: root.appendingPathComponent("ready").path) { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard helper.isRunning, manager.fileExists(atPath: root.appendingPathComponent("ready").path) else {
+                if helper.isRunning { helper.terminate() }
+                throw WorkspaceError(message: "无法启动安装助手，应用未退出。")
+            }
+            guard mayRestart() else {
+                helper.terminate()
+                status = "当前出现未保存内容或任务，安装已取消，请处理完成后重试。"
+                return
+            }
+            handedOff = true
             status = "更新已就绪，正在重启…"
             NSApp.terminate(nil)
         } catch { status = "更新失败：\(error.localizedDescription)。可重试或前往发布页下载。" }
