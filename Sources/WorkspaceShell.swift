@@ -249,6 +249,7 @@ final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
 }
 
 struct WorkspaceRootView: View {
+    @StateObject private var updater = AppUpdater()
     @StateObject private var exporter = ExportViewModel()
     @StateObject private var language = LanguageBrowserViewModel()
     @StateObject private var catalog = ProjectTableBrowserViewModel()
@@ -267,6 +268,10 @@ struct WorkspaceRootView: View {
                     Button("选择 Project 目录…") { exporter.chooseScanRoot() }
                     Button("重新扫描工程") { exporter.scan() }
                     Button("翻译 API 设置…") { language.showsTranslationSettings = true }
+                    Divider()
+                    Text("版本 \(AppUpdater.currentVersion)")
+                    Button("版本与更新说明…") { updater.showsPanel = true; Task { await updater.check() } }
+                    Button("检查更新…") { Task { await updater.check() } }
                 } label: { Image(systemName: "gearshape") }.help("工具设置").disabled(exporter.isExporting || language.isBusy)
                 Button { exportCurrent() } label: {
                     Label(exporter.isExporting ? "正在导表…" : "导表", systemImage: "play.fill")
@@ -320,8 +325,11 @@ struct WorkspaceRootView: View {
             }.padding(.horizontal, 18).padding(.vertical, 8)
         }
         .frame(minWidth: 1120, minHeight: 700)
+        .sheet(isPresented: $updater.showsPanel) { AppUpdatePanel(updater: updater).interactiveDismissDisabled(updater.busy) }
         .task {
             exporter.start()
+            updater.mayRestart = { !workspace.hasPendingChanges && !workspace.isBusy && !exporter.isExporting && !language.isBusy && language.pendingChangeCount == 0 && !comparison.isRunning }
+            updater.start()
             WorkspaceApplicationDelegate.hasUnsavedWork = { workspace.hasPendingChanges || workspace.isBusy || exporter.isExporting || language.isBusy }
         }
     }

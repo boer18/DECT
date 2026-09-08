@@ -2860,6 +2860,15 @@ struct OneClickTableExportApp: App {
 struct LanguageReaderSmokeTest {
     @MainActor static func main() {
         let paths = Array(CommandLine.arguments.dropFirst())
+        if paths.first == "--updater-smoke" {
+            precondition(AppUpdater.isNewer("v1.6.0", than: "1.5.0"))
+            precondition(AppUpdater.isNewer("v1.10.0", than: "1.9.0"))
+            precondition(!AppUpdater.isNewer("v1.6.0", than: "1.6.0"))
+            precondition(!AppUpdater.isNewer("v1.5.0", than: "1.6.0"))
+            precondition(!AppUpdater.isNewer("v1.7.0-beta", than: "1.6.0"))
+            print("更新版本比较：升级、相同版本、降级、多位版本号与预发布过滤通过")
+            return
+        }
         if paths.first == "--comparison-smoke", paths.count == 2 {
             do { try WorkspaceSmokeTests.compareAndTabs(paths[1]) }
             catch { fputs("对比回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
