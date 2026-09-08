@@ -927,6 +927,7 @@ final class GridColumnHeader: NSTableHeaderView {
 
 @MainActor
 final class FillOptionsViewController: NSViewController {
+    static let contentSize = NSSize(width: 150, height: 50)
     private let model: GridEditorModel
     private let onFinish: () -> Void
     private let copyButton: NSButton
@@ -942,34 +943,36 @@ final class FillOptionsViewController: NSViewController {
         sequenceButton.setButtonType(.radio)
         copyButton.target = self; copyButton.action = #selector(selectCopy)
         sequenceButton.target = self; sequenceButton.action = #selector(selectSequence)
-        copyButton.controlSize = NSControl.ControlSize.mini
-        sequenceButton.controlSize = NSControl.ControlSize.mini
+        copyButton.controlSize = NSControl.ControlSize.regular
+        sequenceButton.controlSize = NSControl.ControlSize.regular
+        copyButton.font = NSFont.systemFont(ofSize: 13)
+        sequenceButton.font = NSFont.systemFont(ofSize: 13)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let rootSize = NSSize(width: 150, height: 44)
-        let root = NSView(frame: NSRect(origin: .zero, size: rootSize))
-        let stack = NSStackView(views: [copyButton, sequenceButton])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4)
-        ])
+        let root = NSView(frame: NSRect(origin: .zero, size: Self.contentSize))
+        root.addSubview(copyButton)
+        root.addSubview(sequenceButton)
         view = root
-        preferredContentSize = rootSize
+        preferredContentSize = Self.contentSize
+        viewDidLayout()
         switch model.lastFill?.mode {
         case .copy: copyButton.state = .on; sequenceButton.state = .off
         case .sequence: copyButton.state = .off; sequenceButton.state = .on
         case nil: copyButton.state = .off; sequenceButton.state = .off
         }
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let inset: CGFloat = 4
+        let rowHeight: CGFloat = 21
+        let width = max(0, view.bounds.width - inset * 2)
+        sequenceButton.frame = NSRect(x: inset, y: inset, width: width, height: rowHeight)
+        copyButton.frame = NSRect(x: inset, y: view.bounds.height - inset - rowHeight,
+                                  width: width, height: rowHeight)
     }
 
     @objc private func selectCopy() {
@@ -1089,7 +1092,7 @@ final class FrozenGridView: NSView {
             self?.needsLayout = true
         }
         fillOptionsPopover = popover
-        popover.contentSize = NSSize(width: 150, height: 44)
+        popover.contentSize = FillOptionsViewController.contentSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
     }
 

@@ -261,9 +261,10 @@ enum WorkspaceSmokeTests {
                         "展开填充选项后切换模式失败")
             let fillOptions = FillOptionsViewController(model: handleEditor, onFinish: {})
             _ = fillOptions.view
-            try require(fillOptions.preferredContentSize.width <= 150 &&
-                        fillOptions.preferredContentSize.height <= 44,
-                        "填充选项浮窗留白过大")
+            let optionButtons = fillOptions.view.subviews.compactMap { $0 as? NSButton }
+            try require(fillOptions.preferredContentSize == FillOptionsViewController.contentSize &&
+                        optionButtons.count == 2 && optionButtons.allSatisfy { ($0.font?.pointSize ?? 0) >= 13 },
+                        "填充选项浮窗布局或文字字号不符合紧凑设计")
             handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
             let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
