@@ -126,7 +126,7 @@ enum GridWorkbookIO {
         return GridSnapshot(fileURL: file, fingerprint: before, sheets: sheets, sheet: sheet, cells: cells,
                             rowCount: maxRow + 1, columnCount: maxColumn + 1)
     }
-    static func save(_ snapshot: GridSnapshot, changes: [GridAddress: String]) throws -> GridSnapshot {
+    static func save(_ snapshot: GridSnapshot, changes: [GridAddress: String], formulaAddresses: Set<GridAddress> = []) throws -> GridSnapshot {
         guard !changes.isEmpty else { return snapshot }
         guard try fingerprint(snapshot.fileURL) == snapshot.fingerprint else {
             throw WorkspaceError(message: "原表已被其他操作修改。当前编辑已保留，请复制需要的内容后重新读取，再核对保存。")
@@ -178,7 +178,7 @@ enum GridWorkbookIO {
             }
             for child in (cell.children ?? []).reversed() { child.detach() }
             let value = cleanText(rawText)
-            if snapshot.cells[address]?.formula == true, let formula = formulaBody(value) {
+            if (formulaAddresses.contains(address) || snapshot.cells[address]?.formula == true), let formula = formulaBody(value) {
                 // XLSX stores formulas without the leading '='. Keep a string
                 // result type when the original formula used one; otherwise
                 // let Excel treat the recalculated result as numeric/general.
@@ -224,7 +224,7 @@ enum GridWorkbookIO {
         let validated = try read(replacement, sheetPath: snapshot.sheet.archivePath)
         for (address, text) in changes {
             let clean = cleanText(text)
-            if snapshot.cells[address]?.formula == true, let expectedFormula = formulaBody(clean) {
+            if (formulaAddresses.contains(address) || snapshot.cells[address]?.formula == true), let expectedFormula = formulaBody(clean) {
                 guard validated.cells[address]?.formula == true,
                       validated.cells[address]?.formulaText == expectedFormula else {
                     throw WorkspaceError(message: "\(address.reference) 公式写入核验失败，原表未修改。")
@@ -380,8 +380,13 @@ final class GridEditorModel: ObservableObject {
         }
         frozenRows = r; frozenColumns = c; revision += 1
     }
-    private var history: [[GridAddress: String]] = []
-    private var redoHistory: [[GridAddress: String]] = []
+    private struct EditorState {
+        let changes: [GridAddress: String]
+        let formulaAddresses: Set<GridAddress>
+    }
+    private var history: [EditorState] = []
+    private var redoHistory: [EditorState] = []
+    private(set) var formulaAddresses: Set<GridAddress> = []
     private var observedStamp: String?
     private var checkingExternal = false
     private static func stamp(_ url: URL) -> String {
@@ -408,7 +413,7 @@ final class GridEditorModel: ObservableObject {
                 switch result {
                 case .success(let updated):
                     self.snapshot = updated; self.observedStamp = Self.stamp(updated.fileURL)
-                    self.history = []; self.redoHistory = []; self.revision += 1
+                    self.history = []; self.redoHistory = []; self.formulaAddresses = []; self.revision += 1
                     self.message = "已自动刷新外部修改"; self.isError = false
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
                 }
@@ -438,7 +443,7 @@ final class GridEditorModel: ObservableObject {
                 self.isBusy = false
                 switch result {
                 case .success(let value):
-                    self.snapshot = value; self.history = []; self.redoHistory = []
+                    self.snapshot = value; self.history = []; self.redoHistory = []; self.formulaAddresses = []
                     self.observedStamp = Self.stamp(value.fileURL)
                     self.anchor = GridAddress(row: 0, column: 0); self.extent = self.anchor; self.revision += 1
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -451,16 +456,163 @@ final class GridEditorModel: ObservableObject {
         let address = GridAddress(row: max(0, min(rowCount - 1, row)), column: max(0, min(columnCount - 1, column)))
         if !extending { anchor = address }; extent = address; revision += 1
     }
-    func edit(_ updates: [GridAddress: String]) {
+    func edit(_ updates: [GridAddress: String], formulaAddresses newFormulaAddresses: Set<GridAddress> = []) {
         guard !isBusy, snapshot != nil else { return }
-        guard updates.contains(where: { inputText($0.key) != GridWorkbookIO.cleanText($0.value) }) else { return }
-        history.append(changes); if history.count > 50 { history.removeFirst() }; redoHistory = []
+        let hasChange = updates.contains { address, value in
+            let clean = GridWorkbookIO.cleanText(value)
+            return inputText(address) != clean ||
+                (newFormulaAddresses.contains(address) && !formulaAddresses.contains(address) && snapshot?.cells[address]?.formula != true)
+        }
+        guard hasChange else { return }
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
+        if history.count > 50 { history.removeFirst() }
+        redoHistory = []
         for (address, value) in updates {
             let clean = GridWorkbookIO.cleanText(value)
-            if clean == sourceText(address) { changes.removeValue(forKey: address) }
-            else { changes[address] = clean }
+            if clean == sourceText(address) {
+                changes.removeValue(forKey: address); formulaAddresses.remove(address)
+            } else {
+                changes[address] = clean
+                if newFormulaAddresses.contains(address) ||
+                    (formulaAddresses.contains(address) && GridWorkbookIO.formulaBody(clean) != nil) {
+                    formulaAddresses.insert(address)
+                } else if snapshot?.cells[address]?.formula != true {
+                    formulaAddresses.remove(address)
+                }
+            }
         }
         revision += 1; message = nil; isError = false
+    }
+    private func isFormula(_ address: GridAddress) -> Bool {
+        formulaAddresses.contains(address) || snapshot?.cells[address]?.formula == true
+    }
+    private static func numberValue(_ value: String) -> Double? {
+        guard value.range(of: "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", options: .regularExpression) != nil,
+              !(value.hasPrefix("-") && value.dropFirst().hasPrefix("0") && value.count > 2 && !value.hasPrefix("-0.")),
+              !(!value.hasPrefix("-") && value.hasPrefix("0") && value.count > 1 && !value.hasPrefix("0.")) else { return nil }
+        return Double(value)
+    }
+    private static func numberString(_ value: Double) -> String {
+        if value.rounded() == value { return String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), value) }
+        return String(format: "%.15g", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+    private static func dateValue(_ value: String) -> (date: Date, format: String)? {
+        for format in ["yyyy-MM-dd", "yyyy/MM/dd", "MM/dd/yyyy", "dd/MM/yyyy"] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            formatter.isLenient = false
+            if let date = formatter.date(from: value) { return (date, format) }
+        }
+        return nil
+    }
+    private static func dateString(_ date: Date, format: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = format
+        return formatter.string(from: date)
+    }
+    private static func shiftedFormula(_ value: String, rowDelta: Int, columnDelta: Int) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?<![A-Za-z0-9_])(\\$?)([A-Za-z]{1,3})(\\$?)([0-9]+)") else { return value }
+        let nsValue = value as NSString
+        let fullRange = NSRange(location: 0, length: nsValue.length)
+        var result = value
+        for match in regex.matches(in: value, range: fullRange).reversed() {
+            let prefix = nsValue.substring(with: NSRange(location: 0, length: match.range.location))
+            // Do not rewrite cell-looking text inside a quoted Excel string.
+            if prefix.filter({ $0 == "\"" }).count % 2 == 1 { continue }
+            let columnAbsolute = nsValue.substring(with: match.range(at: 1)) == "$"
+            let letters = nsValue.substring(with: match.range(at: 2)).uppercased()
+            let rowAbsolute = nsValue.substring(with: match.range(at: 3)) == "$"
+            guard let row = Int(nsValue.substring(with: match.range(at: 4))) else { continue }
+            let column = letters.unicodeScalars.reduce(0) { $0 * 26 + Int($1.value) - 64 } - 1
+            let shiftedRow = rowAbsolute ? row : row + rowDelta
+            let shiftedColumn = columnAbsolute ? column : column + columnDelta
+            let replacement: String
+            if shiftedRow < 1 || shiftedColumn < 0 || shiftedColumn >= 16_384 {
+                replacement = "#REF!"
+            } else {
+                replacement = "\(columnAbsolute ? "$" : "")\(GridAddress.columnName(shiftedColumn))\(rowAbsolute ? "$" : "")\(shiftedRow)"
+            }
+            let stringRange = Range(match.range, in: result)!
+            result.replaceSubrange(stringRange, with: replacement)
+        }
+        return result
+    }
+    private func sequenceValue(at target: GridAddress, rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> String? {
+        if sourceColumns.count == 1, sourceRows.count >= 2, target.column == sourceColumns.lowerBound,
+           target.row > sourceRows.upperBound {
+            let first = GridAddress(row: sourceRows.upperBound - 1, column: sourceColumns.lowerBound)
+            let second = GridAddress(row: sourceRows.upperBound, column: sourceColumns.lowerBound)
+            let offset = target.row - sourceRows.upperBound
+            if let a = Self.numberValue(inputText(first)), let b = Self.numberValue(inputText(second)) {
+                return Self.numberString(b + (b - a) * Double(offset))
+            }
+            if let a = Self.dateValue(inputText(first)), let b = Self.dateValue(inputText(second)), a.format == b.format {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let step = calendar.dateComponents([.day], from: a.date, to: b.date).day ?? 0
+                let date = calendar.date(byAdding: .day, value: step * offset, to: b.date) ?? b.date
+                return Self.dateString(date, format: b.format)
+            }
+        }
+        if sourceRows.count == 1, sourceColumns.count >= 2, target.row == sourceRows.lowerBound,
+           target.column > sourceColumns.upperBound {
+            let first = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.upperBound - 1)
+            let second = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.upperBound)
+            let offset = target.column - sourceColumns.upperBound
+            if let a = Self.numberValue(inputText(first)), let b = Self.numberValue(inputText(second)) {
+                return Self.numberString(b + (b - a) * Double(offset))
+            }
+            if let a = Self.dateValue(inputText(first)), let b = Self.dateValue(inputText(second)), a.format == b.format {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let step = calendar.dateComponents([.day], from: a.date, to: b.date).day ?? 0
+                let date = calendar.date(byAdding: .day, value: step * offset, to: b.date) ?? b.date
+                return Self.dateString(date, format: b.format)
+            }
+        }
+        return nil
+    }
+    func fillSelection(to targetRow: Int, targetColumn: Int) {
+        guard !isBusy, snapshot != nil else { return }
+        let sourceRows = rows, sourceColumns = columns
+        let endRow = max(sourceRows.upperBound, min(rowCount - 1, targetRow))
+        let endColumn = max(sourceColumns.upperBound, min(columnCount - 1, targetColumn))
+        guard endRow > sourceRows.upperBound || endColumn > sourceColumns.upperBound else { return }
+        let total = (endRow - sourceRows.lowerBound + 1) * (endColumn - sourceColumns.lowerBound + 1)
+            - sourceRows.count * sourceColumns.count
+        guard total <= 50_000 else {
+            message = "填充范围过大，单次最多填充 50,000 个单元格。"; isError = true; return
+        }
+        var updates: [GridAddress: String] = [:], formulas: Set<GridAddress> = []
+        for row in sourceRows.lowerBound...endRow {
+            for column in sourceColumns.lowerBound...endColumn {
+                guard !sourceRows.contains(row) || !sourceColumns.contains(column) else { continue }
+                let target = GridAddress(row: row, column: column)
+                let source = GridAddress(
+                    row: sourceRows.lowerBound + (row - sourceRows.lowerBound) % sourceRows.count,
+                    column: sourceColumns.lowerBound + (column - sourceColumns.lowerBound) % sourceColumns.count)
+                let value: String
+                if let sequence = sequenceValue(at: target, rows: sourceRows, columns: sourceColumns) {
+                    value = sequence
+                } else if isFormula(source), let formula = GridWorkbookIO.formulaBody(inputText(source)) {
+                    value = Self.shiftedFormula("=\(formula)", rowDelta: row - source.row, columnDelta: column - source.column)
+                    formulas.insert(target)
+                } else {
+                    value = inputText(source)
+                }
+                updates[target] = value
+            }
+        }
+        edit(updates, formulaAddresses: formulas)
+        guard !updates.isEmpty, !isError else { return }
+        anchor = sourceRows.lowerBound <= endRow ? GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound) : anchor
+        extent = GridAddress(row: endRow, column: endColumn)
+        revision += 1
     }
     func copy() {
         let values = rows.map { row in columns.map { inputText(GridAddress(row: row, column: $0)) } }
@@ -484,20 +636,28 @@ final class GridEditorModel: ObservableObject {
         if !isError { anchor = start; extent = GridAddress(row: start.row + values.count - 1, column: start.column + (values.map(\.count).max() ?? 1) - 1); revision += 1 }
     }
     func clearSelection() { edit(Dictionary(uniqueKeysWithValues: rows.flatMap { row in columns.map { (GridAddress(row: row, column: $0), "") } })) }
-    func undo() { guard let previous = history.popLast(), !isBusy else { return }; redoHistory.append(changes); changes = previous; revision += 1 }
-    func redo() { guard let next = redoHistory.popLast(), !isBusy else { return }; history.append(changes); changes = next; revision += 1 }
+    func undo() {
+        guard let previous = history.popLast(), !isBusy else { return }
+        redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
+        changes = previous.changes; formulaAddresses = previous.formulaAddresses; revision += 1
+    }
+    func redo() {
+        guard let next = redoHistory.popLast(), !isBusy else { return }
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
+        changes = next.changes; formulaAddresses = next.formulaAddresses; revision += 1
+    }
     func save(afterSave: (() -> Void)? = nil) {
         guard !isBusy, let snapshot else { return }
         guard !changes.isEmpty else { afterSave?(); return }
-        let updates = changes
+        let updates = changes, formulaUpdates = formulaAddresses
         isBusy = true; message = "正在保存 \(updates.count) 个单元格…"; isError = false
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try GridWorkbookIO.save(snapshot, changes: updates) }
+            let result = Result { try GridWorkbookIO.save(snapshot, changes: updates, formulaAddresses: formulaUpdates) }
             DispatchQueue.main.async {
                 self.isBusy = false
                 switch result {
                 case .success(let saved):
-                    self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.revision += 1
+                    self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []; self.revision += 1
                     self.observedStamp = Self.stamp(saved.fileURL)
                     self.message = "已保存 \(updates.count) 个单元格"; afterSave?()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
@@ -511,14 +671,65 @@ final class CellGridTable: NSTableView {
     weak var editor: GridEditorModel?
     var rowOffset = 0
     var draggingRows = false
+    private var filling = false
+    private var fillTarget: GridAddress?
     func dataColumn(_ local: Int) -> Int {
         guard tableColumns.indices.contains(local) else { return -2 }
         return Int(tableColumns[local].identifier.rawValue) ?? -2
+    }
+    func fillHandleRect() -> NSRect? {
+        guard let editor, !editor.isBusy else { return nil }
+        let globalRow = editor.rows.upperBound - rowOffset
+        guard globalRow >= 0, globalRow < numberOfRows else { return nil }
+        guard let localColumn = tableColumns.firstIndex(where: { $0.identifier.rawValue == String(editor.columns.upperBound) }) else { return nil }
+        let cell = frameOfCell(atColumn: localColumn, row: globalRow)
+        guard !cell.isNull, !cell.isEmpty else { return nil }
+        let side = min(CGFloat(8), max(CGFloat(6), min(cell.width, cell.height) - 4))
+        return NSRect(x: cell.maxX - side / 2, y: cell.maxY - side / 2, width: side, height: side)
+    }
+    private func updateFillTarget(with event: NSEvent) {
+        guard filling, let editor else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        var localRow = row(at: point)
+        if localRow < 0 { localRow = point.y < 0 ? 0 : numberOfRows - 1 }
+        var localColumn = column(at: point)
+        if localColumn < 0 {
+            localColumn = point.x < 0 ? 0 : max(0, numberOfColumns - 1)
+        }
+        let column = dataColumn(localColumn)
+        guard localRow >= 0, column >= 0 else { return }
+        let address = GridAddress(row: localRow + rowOffset, column: column)
+        guard address.row >= editor.rows.upperBound || address.column >= editor.columns.upperBound else {
+            fillTarget = nil; needsDisplay = true; return
+        }
+        fillTarget = address; needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let handle = fillHandleRect() else { return }
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: handle.insetBy(dx: 1, dy: 1), xRadius: 1.5, yRadius: 1.5).fill()
+        if let target = fillTarget,
+           let targetRow = tableColumns.firstIndex(where: { $0.identifier.rawValue == String(target.column) }),
+           target.row - rowOffset >= 0, target.row - rowOffset < numberOfRows {
+            let sourceCell = frameOfCell(atColumn: targetRow, row: target.row - rowOffset)
+            NSColor.controlAccentColor.setStroke()
+            let outline = NSBezierPath(rect: sourceCell.insetBy(dx: 1, dy: 1))
+            outline.lineWidth = 2
+            outline.setLineDash([4, 3], count: 2, phase: 0)
+            outline.stroke()
+        }
     }
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
         guard let editor, !editor.isBusy else { return }
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), localColumn = column(at: p)
+        if let handle = fillHandleRect(), handle.insetBy(dx: -5, dy: -5).contains(p) {
+            editor.onActivate?()
+            filling = true; fillTarget = nil
+            window?.makeFirstResponder(self)
+            return
+        }
         let r = localRow + rowOffset, c = dataColumn(localColumn)
         guard localRow >= 0, c >= -1 else { return }
         editor.onActivate?()
@@ -531,11 +742,26 @@ final class CellGridTable: NSTableView {
         }
     }
     override func mouseDragged(with event: NSEvent) {
+        if filling {
+            autoscroll(with: event)
+            updateFillTarget(with: event)
+            return
+        }
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), r = localRow + rowOffset, c = dataColumn(column(at: p))
         guard localRow >= 0 else { return }
         if draggingRows { editor?.selectRows(r, extending: true); autoscroll(with: event); return }
         guard c >= 0 else { return }
         editor?.select(row: r, column: c, extending: true); autoscroll(with: event)
+    }
+    override func mouseUp(with event: NSEvent) {
+        if filling {
+            updateFillTarget(with: event)
+            let target = fillTarget
+            filling = false; fillTarget = nil; needsDisplay = true
+            if let target { editor?.fillSelection(to: target.row, targetColumn: target.column) }
+            return
+        }
+        super.mouseUp(with: event)
     }
     @objc func copy(_ sender: Any?) { editor?.copy() }
     @objc func paste(_ sender: Any?) { editor?.paste() }
@@ -880,6 +1106,7 @@ struct GridEditorPane: View {
                 Divider()
                 HStack {
                     Text("\(snapshot.rowCount) 行 · \(snapshot.columnCount) 列").font(.caption).foregroundStyle(.secondary)
+                    Text("拖动选区右下角小方块可填充").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("复制选区") { model.copy() }.help("拖选或 Shift 点击选择范围 · ⌘C")
                     Button("粘贴") { model.paste() }.disabled(model.isBusy).help("从选区左上角粘贴 · ⌘V")

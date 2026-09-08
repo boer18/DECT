@@ -150,6 +150,44 @@ enum WorkspaceSmokeTests {
             editor.undo(); try require(editor.text(address) == old && editor.changes.isEmpty, "撤销失败")
             editor.redo(); try require(editor.text(address) == "new", "重做失败")
             editor.undo()
+            var fillCells = revised.cells
+            fillCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: false)
+            fillCells[GridAddress(row: 1, column: 0)] = GridCell(text: "3", formula: false)
+            let fillSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: fillCells,
+                rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
+            let fillEditor = GridEditorModel(); fillEditor.snapshot = fillSnapshot
+            fillEditor.select(row: 0, column: 0, extending: false); fillEditor.select(row: 1, column: 0, extending: true)
+            fillEditor.fillSelection(to: 4, targetColumn: 0)
+            try require(fillEditor.inputText(GridAddress(row: 2, column: 0)) == "5" &&
+                        fillEditor.inputText(GridAddress(row: 4, column: 0)) == "9", "数字序列填充失败")
+            var dateCells = fillCells
+            dateCells[GridAddress(row: 0, column: 0)] = GridCell(text: "2026-09-01", formula: false)
+            dateCells[GridAddress(row: 1, column: 0)] = GridCell(text: "2026-09-02", formula: false)
+            let dateSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: dateCells,
+                rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
+            let dateEditor = GridEditorModel(); dateEditor.snapshot = dateSnapshot
+            dateEditor.select(row: 0, column: 0, extending: false); dateEditor.select(row: 1, column: 0, extending: true)
+            dateEditor.fillSelection(to: 3, targetColumn: 0)
+            try require(dateEditor.inputText(GridAddress(row: 2, column: 0)) == "2026-09-03" &&
+                        dateEditor.inputText(GridAddress(row: 3, column: 0)) == "2026-09-04", "日期序列填充失败")
+            var fillFormulaCells = fillCells
+            fillFormulaCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: true, formulaText: "A1")
+            let fillFormulaSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: fillFormulaCells,
+                rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 1))
+            let fillFormulaEditor = GridEditorModel(); fillFormulaEditor.snapshot = fillFormulaSnapshot
+            fillFormulaEditor.edit([GridAddress(row: 0, column: 0): "=A2"])
+            fillFormulaEditor.select(row: 0, column: 0, extending: false)
+            fillFormulaEditor.fillSelection(to: 2, targetColumn: 0)
+            try require(fillFormulaEditor.inputText(GridAddress(row: 1, column: 0)) == "=A3" &&
+                        fillFormulaEditor.inputText(GridAddress(row: 2, column: 0)) == "=A4" &&
+                        fillFormulaEditor.formulaAddresses.contains(GridAddress(row: 2, column: 0)), "公式相对引用填充失败")
+            let fillFormulaSaved = try GridWorkbookIO.save(fillFormulaSnapshot,
+                changes: fillFormulaEditor.changes, formulaAddresses: fillFormulaEditor.formulaAddresses)
+            try require(fillFormulaSaved.cells[GridAddress(row: 2, column: 0)]?.formula == true &&
+                        fillFormulaSaved.cells[GridAddress(row: 2, column: 0)]?.formulaText == "A4", "新增单元格公式写回失败")
             let longAddress = GridAddress(row: 0, column: 0)
             let longText = String(repeating: "很长的配置内容 Long text\n", count: 1000)
             editor.edit([longAddress: longText])
@@ -184,6 +222,34 @@ enum WorkspaceSmokeTests {
             try require(grid.regions.count == 1 && grid.regions[0].range.lowerBound == 0 &&
                         grid.regions[0].table.dataColumn(0) == -1 &&
                         grid.regions[0].table.dataColumn(1) == 0, "取消冻结后普通表格布局失败")
+            var handleCells = revised.cells
+            handleCells[GridAddress(row: 0, column: 0)] = GridCell(text: "fill seed", formula: false)
+            let handleSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: handleCells,
+                rowCount: max(revised.rowCount, 3), columnCount: max(revised.columnCount, 1))
+            let handleEditor = GridEditorModel(); handleEditor.snapshot = handleSnapshot
+            handleEditor.select(row: 0, column: 0, extending: false)
+            let handleGrid = FrozenGridView(handleEditor)
+            let handleWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            handleWindow.contentView = handleGrid; handleWindow.makeKeyAndOrderFront(nil)
+            handleGrid.frame = NSRect(x: 0, y: 0, width: 900, height: 600); handleGrid.layoutSubtreeIfNeeded(); handleGrid.update()
+            let handleTable = handleGrid.regions[0].table
+            guard let handle = handleTable.fillHandleRect() else { throw WorkspaceError(message: "未绘制表格填充柄") }
+            let handlePoint = handleTable.convert(NSPoint(x: handle.midX, y: handle.midY), to: nil)
+            let down = NSEvent.mouseEvent(with: .leftMouseDown, location: handlePoint, modifierFlags: [], timestamp: 0,
+                windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+            handleTable.mouseDown(with: down)
+            let targetCell = handleTable.frameOfCell(atColumn: 1, row: 2)
+            let targetPoint = handleTable.convert(NSPoint(x: targetCell.midX, y: targetCell.midY), to: nil)
+            let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: targetPoint, modifierFlags: [], timestamp: 0,
+                windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 1)!
+            handleTable.mouseDragged(with: drag)
+            let up = NSEvent.mouseEvent(with: .leftMouseUp, location: targetPoint, modifierFlags: [], timestamp: 0,
+                windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 3, clickCount: 1, pressure: 1)!
+            handleTable.mouseUp(with: up)
+            try require(handleEditor.inputText(GridAddress(row: 1, column: 0)) == "fill seed" &&
+                        handleEditor.inputText(GridAddress(row: 2, column: 0)) == "fill seed", "右下角填充柄拖拽失败")
+            handleWindow.orderOut(nil)
             let workspace = TableWorkspaceModel()
             let testWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
             testWindow.contentView = grid
