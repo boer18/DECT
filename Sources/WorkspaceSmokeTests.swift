@@ -150,6 +150,17 @@ enum WorkspaceSmokeTests {
             editor.undo(); try require(editor.text(address) == old && editor.changes.isEmpty, "撤销失败")
             editor.redo(); try require(editor.text(address) == "new", "重做失败")
             editor.undo()
+            let longAddress = GridAddress(row: 0, column: 0)
+            let longText = String(repeating: "很长的配置内容 Long text\n", count: 1000)
+            editor.edit([longAddress: longText])
+            editor.fitColumns(); editor.adaptiveRows = true
+            try require(editor.columnWidths.values.allSatisfy { $0 >= 90 && $0 <= 300 }, "自适应列宽超出限制")
+            try require(editor.displayRowHeight(0) == 96, "长文本行高未封顶")
+            try require(editor.inputText(longAddress) == longText, "自适应截断了真实内容")
+            editor.undo()
+            editor.resetCellLayout()
+            try require(editor.columnWidths.isEmpty && editor.displayRowHeight(0) == 29, "恢复默认布局失败")
+            editor.adaptiveRows = true
             editor.selectRows(4, extending: false); editor.selectRows(6, extending: true)
             try require(editor.rows == 4...6 && editor.columns.count == editor.usedColumnCount, "整行连选失败")
             editor.selectColumns(2, extending: false); editor.selectColumns(4, extending: true)
@@ -162,6 +173,7 @@ enum WorkspaceSmokeTests {
             grid.layoutSubtreeIfNeeded()
             try require(grid.regions.count == 4 && grid.regions[0].range == 0..<2 && grid.regions[3].range.lowerBound == 2, "冻结区域行映射失败")
             try require(grid.regions[3].table.dataColumn(0) == 2 && grid.regions[2].table.dataColumn(0) == -1, "冻结区域列映射失败")
+            try require(grid.regions[2].table.rect(ofRow: 3).height == grid.regions[3].table.rect(ofRow: 3).height, "自动行高导致冻结区错位")
             let object = grid.regions[3].tableView(grid.regions[3].table, objectValueFor: grid.regions[3].table.tableColumns[0], row: 3) as? String
             try require(object == editor.text(GridAddress(row: 5, column: 2)), "冻结后单元格坐标错误")
             grid.regions[3].scroll.contentView.scroll(to: NSPoint(x: 100, y: 120))
@@ -192,6 +204,7 @@ enum WorkspaceSmokeTests {
             editor.setZoom(1); grid.update()
             testWindow.orderOut(nil)
             print("实际双击事件、编辑器保留、文本提交、150% 缩放与重置通过")
+            print("自适应：列宽限幅、长文本行高封顶、内容完整保留、恢复默认、冻结区一致与换行模式下双击编辑通过")
             try require(!workspace.split, "多表并排默认状态应为关闭")
             workspace.split = false
             func previewTable(_ suffix: String) -> ProjectTable {

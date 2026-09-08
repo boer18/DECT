@@ -289,8 +289,8 @@ enum GridClipboard {
 
 @MainActor
 final class GridEditorModel: ObservableObject {
-    @Published var snapshot: GridSnapshot?
-    @Published var changes: [GridAddress: String] = [:]
+    @Published var snapshot: GridSnapshot? { didSet { rowHeights.removeAll() } }
+    @Published var changes: [GridAddress: String] = [:] { didSet { rowHeights.removeAll() } }
     @Published var anchor = GridAddress(row: 0, column: 0)
     @Published var extent = GridAddress(row: 0, column: 0)
     @Published var isBusy = false
@@ -299,9 +299,50 @@ final class GridEditorModel: ObservableObject {
     @Published var revision = 0
     @Published var frozenRows = 0
     @Published var frozenColumns = 0
+    @Published var showingFullContent = false
     @Published var zoom: CGFloat = 1
     func setZoom(_ value: CGFloat) { zoom = min(2.5, max(0.5, value)); revision += 1 }
-    var columnWidths: [Int: CGFloat] = [:]
+    var columnWidths: [Int: CGFloat] = [:] { didSet { rowHeights.removeAll() } }
+    @Published var adaptiveRows = false { didSet { rowHeights.removeAll(); revision += 1 } }
+    private var rowHeights: [Int: CGFloat] = [:]
+    func displayRowHeight(_ row: Int) -> CGFloat {
+        guard adaptiveRows, row < usedRowCount else { return 29 }
+        if let cached = rowHeights[row] { return cached }
+        var height: CGFloat = 29
+        for column in 0..<usedColumnCount {
+            let value = String(text(GridAddress(row: row, column: column)).prefix(1024))
+            guard !value.isEmpty else { continue }
+            let size = (value as NSString).boundingRect(
+                with: NSSize(width: max(30, (columnWidths[column] ?? 140) - 8), height: 96),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: NSFont.systemFont(ofSize: 12)])
+            height = min(96, max(height, ceil(size.height) + 8))
+            if height == 96 { break }
+        }
+        rowHeights[row] = height
+        return height
+    }
+    func fitColumns() {
+        // Uniformly sample the sheet plus its headers; selection never triggers this scan.
+        let count = usedRowCount
+        let sample = Set(Array(0..<min(12, count)) + (0..<min(240, count)).map { $0 * max(1, count - 1) / max(1, min(240, count) - 1) }).sorted()
+        var widths: [Int: CGFloat] = [:]
+        for column in 0..<usedColumnCount {
+            var measured: [CGFloat] = []
+            for row in sample {
+                let value = String(text(GridAddress(row: row, column: column)).prefix(256))
+                guard !value.isEmpty else { continue }
+                let width = value.components(separatedBy: .newlines).map {
+                    ($0 as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width
+                }.max() ?? 0
+                measured.append(width + 16)
+            }
+            measured.sort()
+            widths[column] = min(300, max(90, measured.isEmpty ? 140 : measured[min(measured.count - 1, Int(Double(measured.count - 1) * 0.9))]))
+        }
+        columnWidths = widths; revision += 1
+    }
+    func resetCellLayout() { columnWidths = [:]; adaptiveRows = false; revision += 1 }
     var onActivate: (() -> Void)?
     private var axisSelection: String?
     var usedRowCount: Int { max(1, max(snapshot?.rowCount ?? 0, (changes.keys.map(\.row).max() ?? -1) + 1)) }
@@ -625,7 +666,10 @@ final class FrozenGridView: NSView {
             regions.forEach {
                 $0.scroll.setMagnification(model.zoom, centeredAt: $0.scroll.contentView.bounds.origin)
                 for column in $0.table.tableColumns {
-                    if let id = Int(column.identifier.rawValue), let width = model.columnWidths[id], abs(column.width - width) > 0.1 { column.width = width }
+                    if let id = Int(column.identifier.rawValue), id >= 0 {
+                        let width = model.columnWidths[id] ?? 140
+                        if abs(column.width - width) > 0.1 { column.width = width }
+                    }
                 }
                 $0.table.reloadData(); $0.table.headerView?.needsDisplay = true
             }
@@ -640,7 +684,7 @@ final class FrozenGridView: NSView {
         }
         guard regions.count == 4 else { return }
         let frozenWidth = (0..<min(model.frozenColumns, model.columnCount - 1)).reduce(CGFloat(49)) { $0 + (model.columnWidths[$1] ?? 140) + 1 } * model.zoom
-        let frozenHeight = model.frozenRows == 0 ? 0 : (CGFloat(min(model.frozenRows, model.rowCount - 1)) * 30 + 23) * model.zoom
+        let frozenHeight = model.frozenRows == 0 ? 0 : ((0..<min(model.frozenRows, model.rowCount - 1)).reduce(CGFloat(23)) { $0 + model.displayRowHeight($1) + 1 }) * model.zoom
         // Large frozen ranges get their own scrollable region rather than hiding the body.
         let w = min(frozenWidth, max(49, bounds.width * 0.55))
         let h = min(frozenHeight, max(0, bounds.height * 0.55))
@@ -718,6 +762,9 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         table.reloadData()
     }
     func numberOfRows(in tableView: NSTableView) -> Int { range.count }
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        model.displayRowHeight(row + range.lowerBound)
+    }
     func tableViewColumnDidResize(_ notification: Notification) {
         guard let column = notification.userInfo?["NSTableColumn"] as? NSTableColumn,
               let id = Int(column.identifier.rawValue), id >= 0,
@@ -747,6 +794,10 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         field.backgroundColor = selected ? NSColor.controlAccentColor.withAlphaComponent(0.22)
             : edited ? NSColor.systemOrange.withAlphaComponent(0.12) : .controlBackgroundColor
         field.textColor = c < 0 ? .secondaryLabelColor : .labelColor
+        field.usesSingleLineMode = !model.adaptiveRows || c < 0
+        field.isScrollable = !model.adaptiveRows || c < 0
+        field.wraps = model.adaptiveRows && c >= 0
+        field.lineBreakMode = model.adaptiveRows && c >= 0 ? .byWordWrapping : .byTruncatingTail
     }
 }
 
@@ -790,6 +841,8 @@ struct GridEditorPane: View {
                         .help("选中公式单元格时显示完整公式；修改公式请保留开头的 =")
                         .disabled(model.isBusy)
                     Button { commit() } label: { Image(systemName: "checkmark") }.help("应用到选中的起始单元格")
+                    Button { commit(); model.showingFullContent = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                        .help("展开查看当前单元格的完整内容")
                 }.padding(.horizontal, 12).padding(.bottom, 8)
                 Divider()
                 HStack {
@@ -809,6 +862,13 @@ struct GridEditorPane: View {
                         Button("复制当前整行") { model.selectRows(model.anchor.row, extending: false); model.copy() }
                         Button("复制当前整列") { model.selectColumns(model.anchor.column, extending: false); model.copy() }
                     }
+                    Menu("自适应") {
+                        Button("智能适配行高与列宽") { commit(); model.fitColumns(); model.adaptiveRows = true }
+                        Button("仅适配列宽") { commit(); model.fitColumns() }
+                        Button(model.adaptiveRows ? "关闭自动换行与行高" : "自动换行与行高") { commit(); model.adaptiveRows.toggle() }
+                        Divider()
+                        Button("恢复默认行高、列宽") { commit(); model.resetCellLayout() }
+                    }.help("列宽最多 300，行高最多 96；超长内容可在内容栏右侧展开查看")
                     Spacer()
                     Button("−") { commit(); model.setZoom(model.zoom - 0.1) }
                     Text("\(Int((model.zoom * 100).rounded()))%")
@@ -835,6 +895,25 @@ struct GridEditorPane: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .sheet(isPresented: $model.showingFullContent) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("完整内容 · \(model.anchor.reference)").font(.headline)
+                    Spacer()
+                    Button("复制内容") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(model.inputText(model.anchor), forType: .string)
+                    }
+                    Button("关闭") { model.showingFullContent = false }.keyboardShortcut(.cancelAction)
+                }
+                ScrollView {
+                    Text(model.inputText(model.anchor).isEmpty ? "（空单元格）" : model.inputText(model.anchor))
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                Text("此窗口只读；修改内容请使用单元格编辑或上方内容栏。公式单元格展示原始公式。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(20).frame(minWidth: 520, idealWidth: 680, minHeight: 360, idealHeight: 480)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay {
             if showsSelectionBorder {
