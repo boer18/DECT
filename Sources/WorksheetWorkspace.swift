@@ -775,15 +775,21 @@ final class GridEditorModel: ObservableObject {
     }
 }
 
-final class CellGridTable: NSTableView {
+final class CellGridTable: NSTableView, NSTextInputClient {
     weak var editor: GridEditorModel?
     var rowOffset = 0
     var draggingRows = false
     private var filling = false
     private var directTypingAddress: GridAddress?
+    private var markedInput = NSMutableAttributedString()
+    private var markedSelection = NSRange(location: 0, length: 0)
+    private var markedAddress: GridAddress?
+    private var markedBase = ""
+    private var handledTextInputEvent = false
 
     func endDirectTyping() {
         directTypingAddress = nil
+        clearMarkedInput()
     }
 
     private func enterDirectText(_ typed: String, editor: GridEditorModel) {
@@ -792,6 +798,109 @@ final class CellGridTable: NSTableView {
         editor.edit([address: value])
         directTypingAddress = address
     }
+
+    private func inputString(_ value: Any) -> String {
+        if let attributed = value as? NSAttributedString { return attributed.string }
+        return value as? String ?? ""
+    }
+
+    private func markedCellAddress() -> GridAddress? {
+        markedAddress ?? editor.map { GridAddress(row: $0.anchor.row, column: $0.anchor.column) }
+    }
+
+    private func refreshMarkedCell(_ address: GridAddress? = nil) {
+        guard let address = address ?? markedAddress,
+              let localColumn = tableColumns.enumerated().first(where: { dataColumn($0.offset) == address.column })?.offset,
+              address.row >= rowOffset,
+              address.row - rowOffset < numberOfRows else { return }
+        reloadData(forRowIndexes: IndexSet(integer: address.row - rowOffset),
+                   columnIndexes: IndexSet(integer: localColumn))
+    }
+
+    private func clearMarkedInput() {
+        let hadMarkedText = markedInput.length > 0 || markedAddress != nil
+        let address = markedAddress
+        markedInput = NSMutableAttributedString()
+        markedSelection = NSRange(location: 0, length: 0)
+        markedAddress = nil
+        markedBase = ""
+        if hadMarkedText { refreshMarkedCell(address) }
+    }
+
+    func markedDisplayText(for address: GridAddress) -> String? {
+        guard markedAddress == address, markedInput.length > 0 else { return nil }
+        return markedBase + markedInput.string
+    }
+
+    // NSTextInputClient keeps macOS input methods in charge of composition.
+    // Direct typing still commits to the selected cell, but pinyin is held as
+    // marked text until the IME commits the chosen candidate.
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        handledTextInputEvent = true
+        let typed = inputString(string)
+        guard let editor, !typed.isEmpty else { return }
+        clearMarkedInput()
+        enterDirectText(typed, editor: editor)
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        handledTextInputEvent = true
+        guard let editor else { return }
+        let address = markedAddress ?? GridAddress(row: editor.anchor.row, column: editor.anchor.column)
+        if markedAddress == nil {
+            markedAddress = address
+            markedBase = directTypingAddress == address ? editor.inputText(address) : ""
+        }
+        markedInput = NSMutableAttributedString(attributedString: string as? NSAttributedString
+            ?? NSAttributedString(string: inputString(string)))
+        markedSelection = selectedRange
+        refreshMarkedCell()
+    }
+
+    func unmarkText() {
+        handledTextInputEvent = true
+        clearMarkedInput()
+    }
+
+    func hasMarkedText() -> Bool { markedInput.length > 0 }
+    func markedRange() -> NSRange {
+        hasMarkedText() ? NSRange(location: 0, length: markedInput.length) : NSRange(location: NSNotFound, length: 0)
+    }
+    func selectedRange() -> NSRange { markedSelection }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+    func attributedSubstring(forProposedRange range: NSRange,
+                             actualRange: UnsafeMutablePointer<NSRange>?) -> NSAttributedString? {
+        let value: NSAttributedString
+        if hasMarkedText() {
+            value = markedInput
+        } else if let editor {
+            value = NSAttributedString(string: editor.inputText(GridAddress(row: editor.anchor.row, column: editor.anchor.column)))
+        } else {
+            value = NSAttributedString(string: "")
+        }
+        let fullRange = NSRange(location: 0, length: value.length)
+        let intersection = NSIntersectionRange(range, fullRange)
+        actualRange?.pointee = intersection
+        return intersection.length > 0 ? value.attributedSubstring(from: intersection) : NSAttributedString(string: "")
+    }
+
+    func firstRect(forCharacterRange range: NSRange,
+                   actualRange: UnsafeMutablePointer<NSRange>?) -> NSRect {
+        actualRange?.pointee = range
+        guard let address = markedCellAddress(),
+              let localColumn = tableColumns.enumerated().first(where: { dataColumn($0.offset) == address.column })?.offset,
+              address.row >= rowOffset,
+              address.row - rowOffset < numberOfRows else {
+            let fallback = convert(bounds, to: nil)
+            return window?.convertToScreen(fallback) ?? fallback
+        }
+        let cell = frameOfCell(atColumn: localColumn, row: address.row - rowOffset)
+        let windowRect = convert(cell, to: nil)
+        return window?.convertToScreen(windowRect) ?? windowRect
+    }
+
+    func characterIndex(for point: NSPoint) -> Int { 0 }
 
     func dataColumn(_ local: Int) -> Int {
         guard tableColumns.indices.contains(local) else { return -2 }
@@ -927,6 +1036,14 @@ final class CellGridTable: NSTableView {
     @objc func paste(_ sender: Any?) { endDirectTyping(); editor?.paste() }
     override func keyDown(with event: NSEvent) {
         guard let editor, !editor.isBusy else { return }
+        // Once an IME has started composing, navigation, backspace, and
+        // return belong to the input method first (for candidate selection or
+        // cancellation), not to the grid's cell-selection shortcuts.
+        if hasMarkedText() {
+            handledTextInputEvent = false
+            interpretKeyEvents([event])
+            if handledTextInputEvent || hasMarkedText() { return }
+        }
         if event.modifierFlags.contains(.command) {
             endDirectTyping()
             switch event.charactersIgnoringModifiers?.lowercased() {
@@ -965,7 +1082,13 @@ final class CellGridTable: NSTableView {
                 // typing replaces the selected cell immediately. Further
                 // characters in the same typing session append to that first
                 // character, without opening a field editor or showing a caret.
-                enterDirectText(typed, editor: editor)
+                // Let NSTextInputClient handle it first so Chinese/Japanese/
+                // Korean composition and their candidate windows work too.
+                handledTextInputEvent = false
+                interpretKeyEvents([event])
+                if !handledTextInputEvent && !hasMarkedText() {
+                    enterDirectText(typed, editor: editor)
+                }
                 return
             }
             endDirectTyping()
@@ -1274,11 +1397,20 @@ final class FrozenGridView: NSView {
         if lastRevision != model.revision {
             lastRevision = model.revision
             regions.forEach {
-                $0.scroll.setMagnification(model.zoom, centeredAt: $0.scroll.contentView.bounds.origin)
+                // Scale the table's actual geometry instead of magnifying the
+                // scroll document. Header and body then share one coordinate
+                // system in both normal and frozen layouts.
+                if abs($0.scroll.magnification - 1) > 0.001 {
+                    $0.scroll.setMagnification(1, centeredAt: $0.scroll.contentView.bounds.origin)
+                }
+                $0.table.intercellSpacing = NSSize(width: model.zoom, height: model.zoom)
+                $0.table.rowHeight = 29 * model.zoom
                 for column in $0.table.tableColumns {
-                    if let id = Int(column.identifier.rawValue), id >= 0 {
-                        let width = model.columnWidths[id] ?? 140
+                    if let id = Int(column.identifier.rawValue) {
+                        let width = (id >= 0 ? (model.columnWidths[id] ?? 140) : 48) * model.zoom
                         if abs(column.width - width) > 0.1 { column.width = width }
+                        column.minWidth = (id >= 0 ? 65 : 48) * model.zoom
+                        column.maxWidth = (id >= 0 ? 1000 : 48) * model.zoom
                     }
                 }
                 ($0.table.headerView as? GridColumnHeader)?.applyZoom(model.zoom)
@@ -1413,7 +1545,7 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         scroll.minMagnification = 0.5; scroll.maxMagnification = 2.5
         table.editor = model; table.rowOffset = rows.lowerBound
         table.delegate = self; table.dataSource = self
-        table.rowHeight = 29; table.intercellSpacing = NSSize(width: 1, height: 1)
+        table.rowHeight = 29 * model.zoom; table.intercellSpacing = NSSize(width: model.zoom, height: model.zoom)
         table.gridStyleMask = [.solidHorizontalGridLineMask, .solidVerticalGridLineMask]
         table.gridColor = .separatorColor; table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .noColumnAutoresizing; table.allowsColumnReordering = false
@@ -1423,13 +1555,13 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         for column in columns {
             let definition = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(column)))
             definition.title = column < 0 ? "行" : GridAddress.columnName(column)
-            definition.width = column < 0 ? 48 : model.columnWidths[column] ?? 140
-            definition.minWidth = column < 0 ? 48 : 65
-            definition.maxWidth = column < 0 ? 48 : 1000
+            definition.width = (column < 0 ? 48 : model.columnWidths[column] ?? 140) * model.zoom
+            definition.minWidth = (column < 0 ? 48 : 65) * model.zoom
+            definition.maxWidth = (column < 0 ? 48 : 1000) * model.zoom
             definition.resizingMask = column < 0 ? [] : .userResizingMask
             definition.isEditable = column >= 0
             let cell = NSTextFieldCell(textCell: "")
-            cell.font = .systemFont(ofSize: 12); cell.lineBreakMode = .byTruncatingTail
+            cell.font = .systemFont(ofSize: 12 * model.zoom); cell.lineBreakMode = .byTruncatingTail
             cell.isScrollable = true; cell.isEditable = column >= 0
             definition.dataCell = cell; table.addTableColumn(definition)
         }
@@ -1440,18 +1572,21 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
     }
     func numberOfRows(in tableView: NSTableView) -> Int { range.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        model.displayRowHeight(row + range.lowerBound)
+        model.displayRowHeight(row + range.lowerBound) * model.zoom
     }
     func tableViewColumnDidResize(_ notification: Notification) {
         guard let column = notification.userInfo?["NSTableColumn"] as? NSTableColumn,
-              let id = Int(column.identifier.rawValue), id >= 0,
-              abs((model.columnWidths[id] ?? 140) - column.width) > 0.1 else { return }
-        model.columnWidths[id] = column.width; model.revision += 1
+              let id = Int(column.identifier.rawValue), id >= 0 else { return }
+        let baseWidth = column.width / max(0.5, model.zoom)
+        guard abs((model.columnWidths[id] ?? 140) - baseWidth) > 0.1 else { return }
+        model.columnWidths[id] = baseWidth; model.revision += 1
     }
     func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
         let r = row + range.lowerBound
         guard let c = Int(tableColumn?.identifier.rawValue ?? "-1"), c >= 0 else { return String(r + 1) }
         let address = GridAddress(row: r, column: c)
+        if let table = tableView as? CellGridTable,
+           let marked = table.markedDisplayText(for: address) { return marked }
         return address == model.anchor ? model.inputText(address) : model.text(address)
     }
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
@@ -1465,6 +1600,7 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
         guard let field = cell as? NSTextFieldCell, let c = Int(tableColumn?.identifier.rawValue ?? "-1") else { return }
         let r = row + range.lowerBound
+        field.font = .systemFont(ofSize: 12 * model.zoom)
         let selected = model.rows.contains(r) && (c < 0 || model.columns.contains(c))
         let edited = model.changes[GridAddress(row: r, column: c)] != nil
         field.drawsBackground = selected || edited || c < 0

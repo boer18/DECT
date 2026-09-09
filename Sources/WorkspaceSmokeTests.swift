@@ -405,6 +405,16 @@ enum WorkspaceSmokeTests {
             }
             sendDirect("直"); sendDirect("接"); sendDirect("替"); sendDirect("换")
             try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "单击后键盘直接替换单元格失败")
+            handleTable.endDirectTyping()
+            handleTable.setMarkedText("jiang", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: 0, length: 0))
+            try require(handleTable.hasMarkedText() && handleTable.markedRange() == NSRange(location: 0, length: 5),
+                        "输入法拼音组合状态未保留")
+            handleTable.insertText("奖", replacementRange: NSRange(location: 0, length: 5))
+            handleTable.insertText("励1", replacementRange: NSRange(location: 1, length: 0))
+            try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "奖励1" &&
+                        !handleTable.hasMarkedText(), "中文输入法提交后单元格写入失败")
+            // Restore the direct-entry value before the independent undo test.
+            handleEditor.edit([GridAddress(row: 0, column: 0): "直接替换"])
             handleEditor.edit([GridAddress(row: 0, column: 0): "one"])
             handleEditor.edit([GridAddress(row: 0, column: 0): "two"])
             handleEditor.edit([GridAddress(row: 0, column: 0): "three"])
@@ -436,10 +446,14 @@ enum WorkspaceSmokeTests {
             editor.setZoom(1.5); grid.update()
             let scaledHeader = grid.regions[0].table.headerView as? GridColumnHeader
             let firstHeaderFontSize = grid.regions[0].table.tableColumns.first?.headerCell.font?.pointSize ?? 0
-            try require(abs(grid.regions[0].scroll.magnification - 1.5) < 0.01 &&
+            let scaledColumnWidth = grid.regions[0].table.tableColumns[1].width
+            let scaledRowHeight = grid.regions[0].table.rect(ofRow: 5).height
+            try require(abs(grid.regions[0].scroll.magnification - 1) < 0.01 &&
                         abs((scaledHeader?.appliedZoom ?? 0) - 1.5) < 0.01 &&
                         abs((scaledHeader?.frame.height ?? 0) - 34.5) < 0.5 &&
-                        abs(firstHeaderFontSize - 18) < 0.5,
+                        abs(firstHeaderFontSize - 18) < 0.5 &&
+                        abs(scaledColumnWidth - 210) < 0.5 &&
+                        abs(scaledRowHeight - (editor.displayRowHeight(5) + 1) * 1.5) < 0.5,
                         "表格缩放或字母表头同步缩放未生效")
             editor.setZoom(1); grid.update()
             testWindow.orderOut(nil)
