@@ -261,6 +261,23 @@ enum WorkspaceSmokeTests {
             try require(singleFillEditor.inputText(GridAddress(row: 1, column: 0)) == "11" &&
                         singleFillEditor.inputText(GridAddress(row: 3, column: 0)) == "13",
                         "填充选项切换为序列未生效")
+            for (seed, previous, expected) in [("奖励1", nil, "奖励4"), ("奖励009", nil, "奖励012"),
+                                               ("奖励3", "奖励1", "奖励9"), ("奖励3", "奖励5", "奖励-3"),
+                                               ("奖励1", "道具1", nil), ("普通奖励", nil, nil), ("=A1", nil, nil)] as [(String, String?, String?)] {
+                try require(GridEditorModel.textSequenceValue(seed, previous: previous, offset: 3) == expected, "文字编号序列失败：\(seed)")
+            }
+            let labelEditor = GridEditorModel(); labelEditor.snapshot = singleFillSnapshot
+            labelEditor.edit([GridAddress(row: 0, column: 0): "奖励1"])
+            labelEditor.select(row: 0, column: 0, extending: false)
+            _ = labelEditor.fillFromHandle(to: 3, targetColumn: 0)
+            try require(labelEditor.inputText(GridAddress(row: 3, column: 0)) == "奖励4", "文字编号自动填充失败")
+            labelEditor.reapplyLastFill(.copy)
+            try require(labelEditor.inputText(GridAddress(row: 3, column: 0)) == "奖励1", "文字编号复制失败")
+            labelEditor.reapplyLastFill(.sequence)
+            try require(labelEditor.inputText(GridAddress(row: 3, column: 0)) == "奖励4", "文字编号切换序列失败")
+            labelEditor.select(row: 0, column: 0, extending: false)
+            _ = labelEditor.fillSelection(to: 0, targetColumn: 3)
+            try require(labelEditor.inputText(GridAddress(row: 0, column: 3)) == "奖励4", "文字编号横向填充失败")
             var fillFormulaCells = fillCells
             fillFormulaCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: true, formulaText: "A1")
             let fillFormulaSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,

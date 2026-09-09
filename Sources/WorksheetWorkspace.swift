@@ -618,7 +618,37 @@ final class GridEditorModel: ObservableObject {
                 return Self.dateString(shifted, format: date.format)
             }
         }
-        return nil
+        // Text labels use their trailing integer; numeric/date/formula handling stays separate.
+        let vertical = sourceColumns.count == 1 && target.column == sourceColumns.lowerBound && target.row > sourceRows.upperBound
+        let horizontal = sourceRows.count == 1 && target.row == sourceRows.lowerBound && target.column > sourceColumns.upperBound
+        guard vertical || horizontal else { return nil }
+        let last = GridAddress(row: sourceRows.upperBound, column: sourceColumns.upperBound)
+        let previous = vertical ? GridAddress(row: last.row - 1, column: last.column) : GridAddress(row: last.row, column: last.column - 1)
+        let count = vertical ? sourceRows.count : sourceColumns.count
+        let offset = vertical ? target.row - last.row : target.column - last.column
+        return Self.textSequenceValue(inputText(last), previous: count > 1 ? inputText(previous) : nil, offset: offset)
+    }
+    static func textSequenceValue(_ value: String, previous: String?, offset: Int) -> String? {
+        func parts(_ text: String) -> (prefix: String, number: Int, width: Int)? {
+            guard !text.hasPrefix("=") else { return nil }
+            let digits = String(text.reversed().prefix { $0 >= "0" && $0 <= "9" }.reversed())
+            let prefix = String(text.dropLast(digits.count))
+            guard !prefix.isEmpty, prefix.contains(where: { $0.isLetter }), let number = Int(digits) else { return nil }
+            return (prefix, number, digits.count > 1 && digits.first == "0" ? digits.count : 0)
+        }
+        guard let last = parts(value) else { return nil }
+        var step = 1
+        if let previous {
+            guard let first = parts(previous), first.prefix == last.prefix else { return nil }
+            let difference = last.number.subtractingReportingOverflow(first.number)
+            guard !difference.overflow else { return nil }
+            step = difference.partialValue
+        }
+        let delta = step.multipliedReportingOverflow(by: offset)
+        let result = last.number.addingReportingOverflow(delta.partialValue)
+        guard !delta.overflow, !result.overflow else { return nil }
+        let digits = String(result.partialValue.magnitude)
+        return last.prefix + (result.partialValue < 0 ? "-" : "") + String(repeating: "0", count: max(0, last.width - digits.count)) + digits
     }
     private func automaticFillMode(rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> GridFillMode {
         if sourceRows.contains(where: { row in sourceColumns.contains(where: { isFormula(GridAddress(row: row, column: $0)) }) }) {
