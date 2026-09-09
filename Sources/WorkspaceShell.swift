@@ -236,11 +236,27 @@ struct TableWorkspaceView: View {
     }
 }
 
+// Route the main window's close button through the normal quit confirmation
+// before closing anything, so cancelling keeps the workspace visible.
+struct WorkspaceCloseBehavior: NSViewRepresentable {
+    final class View: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let button = window?.standardWindowButton(.closeButton) else { return }
+            button.target = NSApplication.shared
+            button.action = #selector(NSApplication.terminate(_:))
+        }
+    }
+    func makeNSView(context: Context) -> View { View() }
+    func updateNSView(_ nsView: View, context: Context) { }
+}
+
 final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
     static var hasUnsavedWork: (() -> Bool)?
     func applicationDidFinishLaunching(_ notification: Notification) {
         UpdateInstaller.acknowledgeLaunch()
     }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard Self.hasUnsavedWork?() == true else { return .terminateNow }
         let alert = NSAlert()
@@ -328,6 +344,7 @@ struct WorkspaceRootView: View {
             }.padding(.horizontal, 18).padding(.vertical, 8)
         }
         .frame(minWidth: 1120, minHeight: 700)
+        .background(WorkspaceCloseBehavior())
         .sheet(isPresented: $updater.showsPanel) { AppUpdatePanel(updater: updater).interactiveDismissDisabled(updater.busy) }
         .sheet(isPresented: $language.showsTranslationSettings) {
             TranslationSettingsView(onSaved: { })
@@ -336,7 +353,7 @@ struct WorkspaceRootView: View {
             exporter.start()
             updater.mayRestart = { !workspace.hasPendingChanges && !workspace.isBusy && !exporter.isExporting && !language.isBusy && language.pendingChangeCount == 0 && !comparison.isRunning }
             updater.start()
-            WorkspaceApplicationDelegate.hasUnsavedWork = { workspace.hasPendingChanges || workspace.isBusy || exporter.isExporting || language.isBusy }
+            WorkspaceApplicationDelegate.hasUnsavedWork = { workspace.hasPendingChanges || workspace.isBusy || exporter.isExporting || language.isBusy || language.pendingChangeCount > 0 || comparison.isRunning || updater.busy }
         }
     }
     private func exportCurrent() {

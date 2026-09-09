@@ -2861,6 +2861,28 @@ struct OneClickTableExportApp: App {
 struct LanguageReaderSmokeTest {
     @MainActor static func main() {
         let paths = Array(CommandLine.arguments.dropFirst())
+        if paths.first == "--close-smoke" {
+            let app = NSApplication.shared
+            let delegate = WorkspaceApplicationDelegate()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.contentView = WorkspaceCloseBehavior.View()
+            let button = window.standardWindowButton(.closeButton)!
+            precondition(button.target === app && button.action == #selector(NSApplication.terminate(_:)))
+            precondition(delegate.applicationShouldTerminateAfterLastWindowClosed(app))
+            WorkspaceApplicationDelegate.hasUnsavedWork = { false }
+            precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+            WorkspaceApplicationDelegate.hasUnsavedWork = { true }
+            for (response, expected) in [(NSApplication.ModalResponse.alertFirstButtonReturn, NSApplication.TerminateReply.terminateCancel),
+                                         (.alertSecondButtonReturn, .terminateNow)] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { app.stopModal(withCode: response) }
+                precondition(delegate.applicationShouldTerminate(app) == expected)
+            }
+            precondition(window.contentView != nil)
+            WorkspaceApplicationDelegate.hasUnsavedWork = nil
+            print("关闭按钮退出路由、最后窗口退出策略、无修改退出、取消/确认退出提示通过")
+            return
+        }
         if paths.first == "--updater-smoke" {
             do { try UpdaterSmokeTests.run() }
             catch { fputs("更新回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
