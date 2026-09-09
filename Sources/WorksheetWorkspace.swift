@@ -1487,7 +1487,9 @@ final class FrozenGridView: NSView {
                     }
                 }
                 ($0.table.headerView as? GridColumnHeader)?.applyZoom(model.zoom)
-                $0.table.reloadData(); $0.table.headerView?.needsDisplay = true
+                $0.table.reloadData()
+                $0.alignDocumentToHeader()
+                $0.table.headerView?.needsDisplay = true
             }
             if shouldRestoreFocus {
                 let target = regions.first(where: {
@@ -1559,6 +1561,7 @@ final class FrozenGridView: NSView {
     override func layout() {
         super.layout()
         if regions.count == 1 {
+            regions[0].alignDocumentToHeader()
             regions[0].scroll.frame = bounds
             regions[0].scroll.hasHorizontalScroller = true
             regions[0].scroll.hasVerticalScroller = true
@@ -1566,6 +1569,7 @@ final class FrozenGridView: NSView {
             return
         }
         guard regions.count == 4 else { return }
+        regions.forEach { $0.alignDocumentToHeader() }
         let frozenWidth = (0..<min(model.frozenColumns, model.columnCount - 1)).reduce(CGFloat(49)) { $0 + (model.columnWidths[$1] ?? 140) + 1 } * model.zoom
         let frozenHeight = model.frozenRows == 0 ? 0 : ((0..<min(model.frozenRows, model.rowCount - 1)).reduce(CGFloat(23)) { $0 + model.displayRowHeight($1) + 1 }) * model.zoom
         // Keep part of the live body visible even when many rows or columns
@@ -1656,6 +1660,12 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         scroll.minMagnification = 0.5; scroll.maxMagnification = 2.5
         table.editor = model; table.rowOffset = rows.lowerBound
         table.delegate = self; table.dataSource = self
+        // macOS's automatic/inset NSTableView style adds a small top inset
+        // while the custom column header remains pinned at y=0. That makes
+        // the first row start underneath the header (only its lower strip is
+        // visible). A worksheet is a continuous grid, so use the edge-to-edge
+        // style and keep the header/body coordinates in the same origin.
+        table.style = .fullWidth
         table.rowHeight = 29 * model.zoom; table.intercellSpacing = NSSize(width: model.zoom, height: model.zoom)
         table.gridStyleMask = [.solidHorizontalGridLineMask, .solidVerticalGridLineMask]
         table.gridColor = .separatorColor; table.usesAlternatingRowBackgroundColors = true
@@ -1680,7 +1690,19 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         scroll.drawsBackground = true; scroll.backgroundColor = .textBackgroundColor
         scroll.horizontalScrollElasticity = .none; scroll.verticalScrollElasticity = .none
         table.reloadData()
+        alignDocumentToHeader()
     }
+
+    func alignDocumentToHeader() {
+        let topInset = table.headerView?.frame.height ?? 0
+        guard topInset > 0 else {
+            if table.frame.origin.y != 0 { table.setFrameOrigin(NSPoint(x: table.frame.origin.x, y: 0)) }
+            return
+        }
+        guard abs(table.frame.origin.y - topInset) > 0.5 else { return }
+        table.setFrameOrigin(NSPoint(x: table.frame.origin.x, y: topInset))
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int { range.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         model.displayRowHeight(row + range.lowerBound) * model.zoom

@@ -136,6 +136,59 @@ enum WorkspaceSmokeTests {
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw WorkspaceError(message: message) }
     }
+
+    @MainActor static func gridGeometry() throws {
+        let sheet = GridSheet(name: "Sheet1", archivePath: "xl/worksheets/sheet1.xml")
+        let cells = Dictionary(uniqueKeysWithValues: (0..<40).flatMap { row in
+            (0..<4).map { column in
+                (GridAddress(row: row, column: column), GridCell(text: "R\(row + 1)C\(column + 1)", formula: false))
+            }
+        })
+        let snapshot = GridSnapshot(
+            fileURL: URL(fileURLWithPath: "/tmp/grid-geometry-smoke.xlsx"),
+            fingerprint: Data(), sheets: [sheet], sheet: sheet, cells: cells,
+            rowCount: 40, columnCount: 4)
+        let editor = GridEditorModel(); editor.snapshot = snapshot
+        let grid = FrozenGridView(editor)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = grid; window.makeKeyAndOrderFront(nil)
+        grid.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        grid.layoutSubtreeIfNeeded(); grid.update(); grid.layoutSubtreeIfNeeded()
+        guard let region = grid.regions.first else { throw WorkspaceError(message: "几何测试没有表格区域") }
+        let table = region.table
+        let header = table.headerView?.frame ?? .zero
+        let first = table.rect(ofRow: 0)
+        let visible = table.visibleRect
+        let origin = region.scroll.contentView.bounds.origin
+        func checkTopRow(_ region: GridRegion, label: String) throws -> (NSRect, NSRect) {
+            guard let headerView = region.table.headerView else {
+                throw WorkspaceError(message: "\(label) 缺少列标题")
+            }
+            let headerInClip = headerView.convert(headerView.bounds, to: region.scroll.contentView)
+            let firstInClip = region.table.convert(region.table.rect(ofRow: 0), to: region.scroll.contentView)
+            guard firstInClip.minY >= headerInClip.maxY - 0.5 && firstInClip.height >= 29 else {
+                throw WorkspaceError(message: "\(label) 第一行被列标题遮挡：header=\(headerInClip) first=\(firstInClip)")
+            }
+            if region.range.count > 1 {
+                let secondInClip = region.table.convert(region.table.rect(ofRow: 1), to: region.scroll.contentView)
+                try require(secondInClip.minY >= firstInClip.maxY - 0.5,
+                            "\(label) 第一行与第二行重叠：first=\(firstInClip) second=\(secondInClip)")
+            }
+            return (headerInClip, firstInClip)
+        }
+        let (headerInClip, firstInClip) = try checkTopRow(region, label: "100% 单表")
+        print("GRID_GEOMETRY header=\(header) first=\(first) firstInClip=\(firstInClip) headerInClip=\(headerInClip) visible=\(visible) origin=\(origin) table=\(table.frame)")
+        editor.setZoom(1.5); grid.update(); grid.layoutSubtreeIfNeeded()
+        let (_, scaledFirstInClip) = try checkTopRow(region, label: "150% 单表")
+        try require(abs(scaledFirstInClip.minY - 34.5) < 0.5, "缩放后第一行未跟随表头下移：\(scaledFirstInClip)")
+        editor.frozenRows = 1; editor.frozenColumns = 1; editor.revision += 1
+        grid.update(); grid.layoutSubtreeIfNeeded()
+        guard let frozenTop = grid.regions.first else { throw WorkspaceError(message: "冻结测试没有左上区域") }
+        _ = try checkTopRow(frozenTop, label: "冻结左上区域")
+        window.orderOut(nil)
+    }
+
     @MainActor static func run(_ files: [String]) throws {
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent("TableWorkspace-smoke-\(UUID().uuidString)")

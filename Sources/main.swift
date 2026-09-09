@@ -2909,6 +2909,11 @@ struct LanguageReaderSmokeTest {
             catch { fputs("工作区回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
+        if paths.first == "--grid-geometry-smoke" {
+            do { try WorkspaceSmokeTests.gridGeometry() }
+            catch { fputs("表格几何回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
         guard !paths.isEmpty else {
             fputs("请提供至少一个 TbLanguage.xlsx 路径。\n", stderr)
             Foundation.exit(64)
