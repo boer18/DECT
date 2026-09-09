@@ -361,6 +361,10 @@ final class GridEditorModel: ObservableObject {
     private var axisSelection: String?
     var usedRowCount: Int { max(1, max(snapshot?.rowCount ?? 0, (changes.keys.map(\.row).max() ?? -1) + 1)) }
     var usedColumnCount: Int { min(256, max(1, max(snapshot?.columnCount ?? 0, (changes.keys.map(\.column).max() ?? -1) + 1))) }
+    private static func roundedUp(_ value: Int, toMultiple multiple: Int) -> Int {
+        guard value > 0 else { return 0 }
+        return ((value + multiple - 1) / multiple) * multiple
+    }
     func selectRows(_ row: Int, extending: Bool) {
         let start = extending && axisSelection == "row" ? anchor.row : row
         anchor = GridAddress(row: start, column: 0)
@@ -439,8 +443,25 @@ final class GridEditorModel: ObservableObject {
     var selectionLabel: String { "\(GridAddress(row: rows.lowerBound, column: columns.lowerBound).reference):\(GridAddress(row: rows.upperBound, column: columns.upperBound).reference)" }
     var canUndo: Bool { !history.isEmpty }
     var canRedo: Bool { !redoHistory.isEmpty }
-    var rowCount: Int { max(40, max(snapshot?.rowCount ?? 0, (changes.keys.map(\.row).max() ?? -1) + 1) + 20) }
-    var columnCount: Int { min(256, max(12, max(snapshot?.columnCount ?? 0, (changes.keys.map(\.column).max() ?? -1) + 1) + 2)) }
+    // Keep a stable virtual editing buffer around the source sheet. Growing
+    // this count for every first edit in the buffer rebuilds the AppKit table
+    // and loses the direct-typing session between two keystrokes (notably
+    // when entering B201 in a sheet whose source ends at row 200). Expand in
+    // fixed blocks only after the user reaches the current buffer boundary.
+    var rowCount: Int {
+        let sourceCount = snapshot?.rowCount ?? 0
+        let editedCount = (changes.keys.map(\.row).max() ?? -1) + 1
+        let baseline = max(40, Self.roundedUp(sourceCount + 20, toMultiple: 20))
+        let required = Self.roundedUp(max(sourceCount, editedCount), toMultiple: 20)
+        return max(baseline, required)
+    }
+    var columnCount: Int {
+        let sourceCount = snapshot?.columnCount ?? 0
+        let editedCount = (changes.keys.map(\.column).max() ?? -1) + 1
+        let baseline = max(12, Self.roundedUp(sourceCount + 2, toMultiple: 8))
+        let required = Self.roundedUp(max(sourceCount, editedCount), toMultiple: 8)
+        return min(256, max(baseline, required))
+    }
     func sourceText(_ address: GridAddress) -> String {
         guard let cell = snapshot?.cells[address] else { return "" }
         return cell.formula ? "=\(cell.formulaText ?? "")" : cell.text

@@ -452,6 +452,12 @@ enum WorkspaceSmokeTests {
                     windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 10 + dataColumn, clickCount: 1, pressure: 1)!
                 handleTable.mouseDown(with: click)
             }
+            func sendWindowDirect(_ text: String) {
+                let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: handleWindow.windowNumber, context: nil, characters: text,
+                    charactersIgnoringModifiers: text, isARepeat: false, keyCode: 0)!
+                handleWindow.sendEvent(directKey)
+            }
             for dataColumn in 0...2 {
                 clickDataCell(dataColumn, row: 10)
                 sendDirect("1"); sendDirect("2")
@@ -459,6 +465,45 @@ enum WorkspaceSmokeTests {
                             "第 \(dataColumn + 1) 列连续数字输入首字符被吞掉")
                 handleTable.endDirectTyping()
             }
+            handleTable.scrollRowToVisible(200)
+            handleGrid.layoutSubtreeIfNeeded()
+            clickDataCell(1, row: 200) // B201 is zero-based row 200.
+            sendWindowDirect("1")
+            // A newly edited row changes the virtual table extent. This is
+            // the exact case where a SwiftUI/AppKit refresh used to rebuild
+            // the table between the first and second digit.
+            handleGrid.update(); handleGrid.layoutSubtreeIfNeeded()
+            sendWindowDirect("2")
+            try require(handleEditor.inputText(GridAddress(row: 200, column: 1)) == "12",
+                        "B201 在刷新表格后连续数字输入首字符被吞掉")
+            handleTable.endDirectTyping()
+            let exactB201Snapshot = try GridWorkbookIO.read(original)
+            let exactB201Editor = GridEditorModel(); exactB201Editor.snapshot = exactB201Snapshot
+            exactB201Editor.select(row: 200, column: 1, extending: false)
+            let exactB201Grid = FrozenGridView(exactB201Editor)
+            let exactB201Window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            exactB201Window.contentView = exactB201Grid; exactB201Window.makeKeyAndOrderFront(nil)
+            exactB201Grid.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+            exactB201Grid.layoutSubtreeIfNeeded(); exactB201Grid.update(); exactB201Grid.layoutSubtreeIfNeeded()
+            let exactB201Table = exactB201Grid.regions[0].table
+            exactB201Table.scrollRowToVisible(200); exactB201Grid.layoutSubtreeIfNeeded()
+            let exactB201Cell = exactB201Table.frameOfCell(atColumn: 2, row: 200)
+            let exactB201Point = exactB201Table.convert(NSPoint(x: exactB201Cell.midX, y: exactB201Cell.midY), to: nil)
+            let exactB201Click = NSEvent.mouseEvent(with: .leftMouseDown, location: exactB201Point, modifierFlags: [], timestamp: 0,
+                windowNumber: exactB201Window.windowNumber, context: nil, eventNumber: 40, clickCount: 1, pressure: 1)!
+            exactB201Table.mouseDown(with: exactB201Click)
+            func sendExactB201(_ text: String) {
+                let directKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: exactB201Window.windowNumber, context: nil, characters: text,
+                    charactersIgnoringModifiers: text, isARepeat: false, keyCode: 0)!
+                exactB201Window.sendEvent(directKey)
+            }
+            sendExactB201("1")
+            exactB201Grid.update(); exactB201Grid.layoutSubtreeIfNeeded()
+            sendExactB201("2")
+            try require(exactB201Editor.inputText(GridAddress(row: 200, column: 1)) == "12",
+                        "原始 TbDecorationModule.xlsx 的 B201 连续数字输入首字符被吞掉")
+            exactB201Window.orderOut(nil)
             handleEditor.select(row: 0, column: 0, extending: false)
             handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
             handleTable.setMarkedText("jiang", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: 0, length: 0))
