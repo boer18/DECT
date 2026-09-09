@@ -439,6 +439,28 @@ enum WorkspaceSmokeTests {
             sendDirect("1"); sendDirect("2")
             try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "12", "连续数字输入首字符被吞掉")
             handleTable.endDirectTyping()
+            handleTable.setMarkedText("1", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 0, length: 0))
+            handleTable.setMarkedText("2", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 0, length: 0))
+            try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "12" &&
+                        !handleTable.hasMarkedText(), "输入法组合入口连续数字输入首字符被吞掉")
+            handleTable.endDirectTyping()
+            func clickDataCell(_ dataColumn: Int, row: Int) {
+                let localColumn = dataColumn + 1 // local column 0 is the row-number column.
+                let cell = handleTable.frameOfCell(atColumn: localColumn, row: row)
+                let point = handleTable.convert(NSPoint(x: cell.midX, y: cell.midY), to: nil)
+                let click = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0,
+                    windowNumber: handleWindow.windowNumber, context: nil, eventNumber: 10 + dataColumn, clickCount: 1, pressure: 1)!
+                handleTable.mouseDown(with: click)
+            }
+            for dataColumn in 0...2 {
+                clickDataCell(dataColumn, row: 10)
+                sendDirect("1"); sendDirect("2")
+                try require(handleEditor.inputText(GridAddress(row: 10, column: dataColumn)) == "12",
+                            "第 \(dataColumn + 1) 列连续数字输入首字符被吞掉")
+                handleTable.endDirectTyping()
+            }
+            handleEditor.select(row: 0, column: 0, extending: false)
+            handleGrid.update(); handleWindow.makeFirstResponder(handleTable)
             handleTable.setMarkedText("jiang", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: 0, length: 0))
             try require(handleTable.hasMarkedText() && handleTable.markedRange() == NSRange(location: 0, length: 5),
                         "输入法拼音组合状态未保留")
@@ -460,6 +482,32 @@ enum WorkspaceSmokeTests {
             sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "two", "第一次连续撤回失败")
             sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "one", "第二次连续撤回失败")
             sendUndo(); try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "第三次连续撤回失败")
+            let frozenInputEditor = GridEditorModel(); frozenInputEditor.snapshot = handleSnapshot
+            frozenInputEditor.frozenColumns = 2
+            frozenInputEditor.select(row: 10, column: 0, extending: false)
+            let frozenInputGrid = FrozenGridView(frozenInputEditor)
+            let frozenInputWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            frozenInputWindow.contentView = frozenInputGrid; frozenInputWindow.makeKeyAndOrderFront(nil)
+            frozenInputGrid.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+            frozenInputGrid.layoutSubtreeIfNeeded(); frozenInputGrid.update(); frozenInputGrid.layoutSubtreeIfNeeded()
+            for dataColumn in 0...2 {
+                guard let region = frozenInputGrid.regions.first(where: {
+                    $0.range.contains(10) && $0.table.tableColumns.contains { $0.identifier.rawValue == String(dataColumn) }
+                }), let localColumn = region.table.tableColumns.firstIndex(where: { $0.identifier.rawValue == String(dataColumn) }) else {
+                    throw WorkspaceError(message: "冻结列输入测试找不到第 \(dataColumn + 1) 列")
+                }
+                let cell = region.table.frameOfCell(atColumn: localColumn, row: 10 - region.range.lowerBound)
+                let point = region.table.convert(NSPoint(x: cell.midX, y: cell.midY), to: nil)
+                let click = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0,
+                    windowNumber: frozenInputWindow.windowNumber, context: nil, eventNumber: 20 + dataColumn, clickCount: 1, pressure: 1)!
+                region.table.mouseDown(with: click)
+                region.table.setMarkedText("1", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 0, length: 0))
+                region.table.setMarkedText("2", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 0, length: 0))
+                try require(frozenInputEditor.inputText(GridAddress(row: 10, column: dataColumn)) == "12",
+                            "冻结列第 \(dataColumn + 1) 列连续数字输入首字符被吞掉")
+                region.table.endDirectTyping()
+            }
+            frozenInputWindow.orderOut(nil)
             handleWindow.orderOut(nil)
             let workspace = TableWorkspaceModel()
             let testWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)

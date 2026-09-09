@@ -832,6 +832,10 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         return value as? String ?? ""
     }
 
+    private func isASCIIInteger(_ value: String) -> Bool {
+        !value.isEmpty && value.unicodeScalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
+    }
+
     private func markedCellAddress() -> GridAddress? {
         markedAddress ?? editor.map { GridAddress(row: $0.anchor.row, column: $0.anchor.column) }
     }
@@ -874,13 +878,25 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         handledTextInputEvent = true
         guard let editor else { return }
+        let marked = inputString(string)
+        // A few input sources send an ordinary number through
+        // setMarkedText before committing it. Treat that as direct numeric
+        // entry when no composition is already visible; otherwise a second
+        // number replaces the first marked digit. If pinyin or another real
+        // composition is active, hasMarkedText() stays true and candidate
+        // selection continues through the normal IME path.
+        if !hasMarkedText() && isASCIIInteger(marked) {
+            clearMarkedInput()
+            enterDirectText(marked, editor: editor)
+            return
+        }
         let address = markedAddress ?? GridAddress(row: editor.anchor.row, column: editor.anchor.column)
         if markedAddress == nil {
             markedAddress = address
             markedBase = directTypingAddress == address ? editor.inputText(address) : ""
         }
         markedInput = NSMutableAttributedString(attributedString: string as? NSAttributedString
-            ?? NSAttributedString(string: inputString(string)))
+            ?? NSAttributedString(string: marked))
         markedSelection = selectedRange
         refreshMarkedCell()
     }
@@ -1116,8 +1132,7 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                 // interpretKeyEvents then replaces it, so direct numeric entry
                 // must bypass that path. Once marked text exists, digits still
                 // go to the IME so candidate selection keeps working.
-                let isASCIIDigit = typed.unicodeScalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
-                if isASCIIDigit && !hasMarkedText() {
+                if isASCIIInteger(typed) && !hasMarkedText() {
                     enterDirectText(typed, editor: editor)
                     return
                 }
