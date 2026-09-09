@@ -278,6 +278,27 @@ enum WorkspaceSmokeTests {
             labelEditor.select(row: 0, column: 0, extending: false)
             _ = labelEditor.fillSelection(to: 0, targetColumn: 3)
             try require(labelEditor.inputText(GridAddress(row: 0, column: 3)) == "奖励4", "文字编号横向填充失败")
+            for (seed, previous, expected) in [("1奖励", nil, "4奖励"), ("奖励1级", nil, "奖励4级"),
+                                                ("v1.2", nil, "v1.5"), ("v1.4", "v1.2", "v1.10")] as [(String, String?, String?)] {
+                try require(GridEditorModel.textSequenceValue(seed, previous: previous, offset: 3) == expected, "文字中间/开头编号序列失败：\(seed)")
+            }
+            var independentFillCells = fillCells
+            independentFillCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: false)
+            independentFillCells[GridAddress(row: 1, column: 0)] = GridCell(text: "3", formula: false)
+            independentFillCells[GridAddress(row: 0, column: 1)] = GridCell(text: "奖励1", formula: false)
+            independentFillCells[GridAddress(row: 1, column: 1)] = GridCell(text: "奖励3", formula: false)
+            let independentSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
+                sheets: revised.sheets, sheet: revised.sheet, cells: independentFillCells,
+                rowCount: max(revised.rowCount, 2), columnCount: max(revised.columnCount, 2))
+            let independentEditor = GridEditorModel(); independentEditor.snapshot = independentSnapshot
+            independentEditor.select(row: 0, column: 0, extending: false)
+            independentEditor.select(row: 1, column: 1, extending: true)
+            _ = independentEditor.fillSelection(to: 3, targetColumn: 1, mode: .sequence)
+            try require(independentEditor.inputText(GridAddress(row: 2, column: 0)) == "5" &&
+                        independentEditor.inputText(GridAddress(row: 3, column: 0)) == "7" &&
+                        independentEditor.inputText(GridAddress(row: 2, column: 1)) == "奖励5" &&
+                        independentEditor.inputText(GridAddress(row: 3, column: 1)) == "奖励7",
+                        "多单元格填充未按列独立判断序列")
             var fillFormulaCells = fillCells
             fillFormulaCells[GridAddress(row: 0, column: 0)] = GridCell(text: "1", formula: true, formulaText: "A1")
             let fillFormulaSnapshot = GridSnapshot(fileURL: revised.fileURL, fingerprint: revised.fingerprint,
@@ -324,6 +345,15 @@ enum WorkspaceSmokeTests {
             grid.sync(from: 3)
             try require(abs(grid.regions[1].scroll.contentView.bounds.origin.x - grid.regions[3].scroll.contentView.bounds.origin.x) < 1, "冻结顶部横向同步失败")
             try require(abs(grid.regions[2].scroll.contentView.bounds.origin.y - grid.regions[3].scroll.contentView.bounds.origin.y) < 1, "冻结左侧纵向同步失败")
+            editor.frozenRows = 30; editor.frozenColumns = 8; editor.revision += 1
+            grid.update(); grid.layoutSubtreeIfNeeded()
+            try require(grid.regions.count == 4 && grid.regions[3].scroll.frame.width > 0 && grid.regions[3].scroll.frame.height > 0,
+                        "大范围冻结后主体表格被裁切")
+            try require(grid.regions[0].scroll.hasHorizontalScroller && grid.regions[0].scroll.hasVerticalScroller &&
+                        grid.regions[2].scroll.hasHorizontalScroller,
+                        "大范围冻结区域缺少内部滚动能力")
+            editor.frozenRows = 2; editor.frozenColumns = 2; editor.revision += 1
+            grid.update(); grid.layoutSubtreeIfNeeded()
             editor.select(row: 0, column: 0, extending: false)
             grid.update()
             grid.regions[3].scroll.contentView.scroll(to: NSPoint(x: 120, y: 180))
@@ -405,6 +435,9 @@ enum WorkspaceSmokeTests {
             }
             sendDirect("直"); sendDirect("接"); sendDirect("替"); sendDirect("换")
             try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "直接替换", "单击后键盘直接替换单元格失败")
+            handleTable.endDirectTyping()
+            sendDirect("1"); sendDirect("2")
+            try require(handleEditor.inputText(GridAddress(row: 0, column: 0)) == "12", "连续数字输入首字符被吞掉")
             handleTable.endDirectTyping()
             handleTable.setMarkedText("jiang", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: 0, length: 0))
             try require(handleTable.hasMarkedText() && handleTable.markedRange() == NSRange(location: 0, length: 5),

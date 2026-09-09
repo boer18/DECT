@@ -561,103 +561,131 @@ final class GridEditorModel: ObservableObject {
         }
         return result
     }
-    private func sequenceValue(at target: GridAddress, rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> String? {
-        if sourceColumns.count == 1, sourceRows.count >= 2, target.column == sourceColumns.lowerBound,
-           target.row > sourceRows.upperBound {
-            let first = GridAddress(row: sourceRows.upperBound - 1, column: sourceColumns.lowerBound)
-            let second = GridAddress(row: sourceRows.upperBound, column: sourceColumns.lowerBound)
-            let offset = target.row - sourceRows.upperBound
-            if let a = Self.numberValue(inputText(first)), let b = Self.numberValue(inputText(second)) {
-                return Self.numberString(b + (b - a) * Double(offset))
-            }
-            if let a = Self.dateValue(inputText(first)), let b = Self.dateValue(inputText(second)), a.format == b.format {
-                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-                let step = calendar.dateComponents([.day], from: a.date, to: b.date).day ?? 0
-                let date = calendar.date(byAdding: .day, value: step * offset, to: b.date) ?? b.date
-                return Self.dateString(date, format: b.format)
-            }
-        }
-        if sourceColumns.count == 1, sourceRows.count == 1, target.column == sourceColumns.lowerBound,
-           target.row > sourceRows.upperBound {
-            let source = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound)
-            let offset = target.row - source.row
-            if let number = Self.numberValue(inputText(source)) {
-                return Self.numberString(number + Double(offset))
-            }
-            if let date = Self.dateValue(inputText(source)) {
-                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-                let shifted = calendar.date(byAdding: .day, value: offset, to: date.date) ?? date.date
-                return Self.dateString(shifted, format: date.format)
-            }
-        }
-        if sourceRows.count == 1, sourceColumns.count >= 2, target.row == sourceRows.lowerBound,
-           target.column > sourceColumns.upperBound {
-            let first = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.upperBound - 1)
-            let second = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.upperBound)
-            let offset = target.column - sourceColumns.upperBound
-            if let a = Self.numberValue(inputText(first)), let b = Self.numberValue(inputText(second)) {
-                return Self.numberString(b + (b - a) * Double(offset))
-            }
-            if let a = Self.dateValue(inputText(first)), let b = Self.dateValue(inputText(second)), a.format == b.format {
-                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-                let step = calendar.dateComponents([.day], from: a.date, to: b.date).day ?? 0
-                let date = calendar.date(byAdding: .day, value: step * offset, to: b.date) ?? b.date
-                return Self.dateString(date, format: b.format)
-            }
-        }
-        if sourceRows.count == 1, sourceColumns.count == 1, target.row == sourceRows.lowerBound,
-           target.column > sourceColumns.upperBound {
-            let source = GridAddress(row: sourceRows.lowerBound, column: sourceColumns.lowerBound)
-            let offset = target.column - source.column
-            if let number = Self.numberValue(inputText(source)) {
-                return Self.numberString(number + Double(offset))
-            }
-            if let date = Self.dateValue(inputText(source)) {
-                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-                let shifted = calendar.date(byAdding: .day, value: offset, to: date.date) ?? date.date
-                return Self.dateString(shifted, format: date.format)
-            }
-        }
-        // Text labels use their trailing integer; numeric/date/formula handling stays separate.
-        let vertical = sourceColumns.count == 1 && target.column == sourceColumns.lowerBound && target.row > sourceRows.upperBound
-        let horizontal = sourceRows.count == 1 && target.row == sourceRows.lowerBound && target.column > sourceColumns.upperBound
-        guard vertical || horizontal else { return nil }
-        let last = GridAddress(row: sourceRows.upperBound, column: sourceColumns.upperBound)
-        let previous = vertical ? GridAddress(row: last.row - 1, column: last.column) : GridAddress(row: last.row, column: last.column - 1)
-        let count = vertical ? sourceRows.count : sourceColumns.count
-        let offset = vertical ? target.row - last.row : target.column - last.column
-        return Self.textSequenceValue(inputText(last), previous: count > 1 ? inputText(previous) : nil, offset: offset)
+    private struct TextSequencePart {
+        let prefix: String
+        let number: Int
+        let suffix: String
+        let width: Int
     }
-    static func textSequenceValue(_ value: String, previous: String?, offset: Int) -> String? {
-        func parts(_ text: String) -> (prefix: String, number: Int, width: Int)? {
-            guard !text.hasPrefix("=") else { return nil }
-            let digits = String(text.reversed().prefix { $0 >= "0" && $0 <= "9" }.reversed())
-            let prefix = String(text.dropLast(digits.count))
-            guard !prefix.isEmpty, prefix.contains(where: { $0.isLetter }), let number = Int(digits) else { return nil }
-            return (prefix, number, digits.count > 1 && digits.first == "0" ? digits.count : 0)
+
+    private static func textSequenceParts(_ value: String) -> [TextSequencePart] {
+        guard !value.hasPrefix("=") else { return [] }
+        guard let regex = try? NSRegularExpression(pattern: "(?<![0-9])-?[0-9]+") else { return [] }
+        let nsValue = value as NSString
+        let fullRange = NSRange(location: 0, length: nsValue.length)
+        return regex.matches(in: value, range: fullRange).compactMap { match in
+            let token = nsValue.substring(with: match.range)
+            guard let number = Int(token) else { return nil }
+            let prefix = nsValue.substring(with: NSRange(location: 0, length: match.range.location))
+            let suffixStart = match.range.location + match.range.length
+            let suffix = nsValue.substring(with: NSRange(location: suffixStart, length: nsValue.length - suffixStart))
+            let digits = token.hasPrefix("-") ? String(token.dropFirst()) : token
+            let width = digits.count > 1 && digits.first == "0" ? digits.count : 0
+            // A plain number is already handled by numberValue; requiring
+            // surrounding text keeps leading-zero numeric cells unchanged.
+            guard !prefix.isEmpty || !suffix.isEmpty else { return nil }
+            return TextSequencePart(prefix: prefix, number: number, suffix: suffix, width: width)
         }
-        guard let last = parts(value) else { return nil }
+    }
+
+    static func textSequenceValue(_ value: String, previous: String?, offset: Int) -> String? {
+        let lastParts = textSequenceParts(value)
+        guard !lastParts.isEmpty else { return nil }
+        let selectedIndex: Int
         var step = 1
         if let previous {
-            guard let first = parts(previous), first.prefix == last.prefix else { return nil }
-            let difference = last.number.subtractingReportingOverflow(first.number)
+            let firstParts = textSequenceParts(previous)
+            guard firstParts.count == lastParts.count else { return nil }
+            let matching = lastParts.indices.filter {
+                lastParts[$0].prefix == firstParts[$0].prefix &&
+                lastParts[$0].suffix == firstParts[$0].suffix
+            }
+            guard !matching.isEmpty else { return nil }
+            selectedIndex = matching.first(where: { lastParts[$0].number != firstParts[$0].number }) ?? matching.last!
+            let difference = lastParts[selectedIndex].number.subtractingReportingOverflow(firstParts[selectedIndex].number)
             guard !difference.overflow else { return nil }
             step = difference.partialValue
+        } else {
+            // With one starting value, the rightmost number is the least
+            // surprising choice for values such as v1.2 or reward-1-level.
+            selectedIndex = lastParts.count - 1
         }
         let delta = step.multipliedReportingOverflow(by: offset)
-        let result = last.number.addingReportingOverflow(delta.partialValue)
+        let result = lastParts[selectedIndex].number.addingReportingOverflow(delta.partialValue)
         guard !delta.overflow, !result.overflow else { return nil }
+        let part = lastParts[selectedIndex]
         let digits = String(result.partialValue.magnitude)
-        return last.prefix + (result.partialValue < 0 ? "-" : "") + String(repeating: "0", count: max(0, last.width - digits.count)) + digits
+        let replacement = (result.partialValue < 0 ? "-" : "") +
+            String(repeating: "0", count: max(0, part.width - digits.count)) + digits
+        return part.prefix + replacement + part.suffix
+    }
+
+    private func scalarSequenceValue(last: String, previous: String?, offset: Int) -> String? {
+        if let number = Self.numberValue(last) {
+            if let previous, let first = Self.numberValue(previous) {
+                return Self.numberString(number + (number - first) * Double(offset))
+            }
+            if previous == nil { return Self.numberString(number + Double(offset)) }
+            return nil
+        }
+        if let date = Self.dateValue(last) {
+            if let previous, let first = Self.dateValue(previous), date.format == first.format {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let step = calendar.dateComponents([.day], from: first.date, to: date.date).day ?? 0
+                let shifted = calendar.date(byAdding: .day, value: step * offset, to: date.date) ?? date.date
+                return Self.dateString(shifted, format: date.format)
+            }
+            if previous == nil {
+                var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let shifted = calendar.date(byAdding: .day, value: offset, to: date.date) ?? date.date
+                return Self.dateString(shifted, format: date.format)
+            }
+            return nil
+        }
+        return Self.textSequenceValue(last, previous: previous, offset: offset)
+    }
+
+    private func sequenceValue(at target: GridAddress, rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> String? {
+        guard !sourceRows.isEmpty, !sourceColumns.isEmpty else { return nil }
+        // A downward fill is evaluated independently for every source column.
+        // This is what makes a rectangular selection such as A1:B2 continue
+        // A's series and B's series separately.
+        if target.row > sourceRows.upperBound {
+            let sourceColumn = sourceColumns.contains(target.column)
+                ? target.column
+                : sourceColumns.lowerBound + (target.column - sourceColumns.lowerBound) % sourceColumns.count
+            let last = GridAddress(row: sourceRows.upperBound, column: sourceColumn)
+            let previous = sourceRows.count >= 2
+                ? GridAddress(row: sourceRows.upperBound - 1, column: sourceColumn) : nil
+            let offset = target.row - sourceRows.upperBound
+            return scalarSequenceValue(last: inputText(last), previous: previous.map(inputText), offset: offset)
+        }
+        // A rightward fill is evaluated independently for every source row.
+        if target.column > sourceColumns.upperBound {
+            let sourceRow = sourceRows.contains(target.row)
+                ? target.row
+                : sourceRows.lowerBound + (target.row - sourceRows.lowerBound) % sourceRows.count
+            let last = GridAddress(row: sourceRow, column: sourceColumns.upperBound)
+            let previous = sourceColumns.count >= 2
+                ? GridAddress(row: sourceRow, column: sourceColumns.upperBound - 1) : nil
+            let offset = target.column - sourceColumns.upperBound
+            return scalarSequenceValue(last: inputText(last), previous: previous.map(inputText), offset: offset)
+        }
+        return nil
     }
     private func automaticFillMode(rows sourceRows: ClosedRange<Int>, columns sourceColumns: ClosedRange<Int>) -> GridFillMode {
         if sourceRows.contains(where: { row in sourceColumns.contains(where: { isFormula(GridAddress(row: row, column: $0)) }) }) {
             return .sequence
         }
-        let probe = GridAddress(row: sourceRows.upperBound + 1, column: sourceColumns.upperBound)
-        let horizontalProbe = GridAddress(row: sourceRows.upperBound, column: sourceColumns.upperBound + 1)
-        return sequenceValue(at: probe, rows: sourceRows, columns: sourceColumns) != nil ||
-            sequenceValue(at: horizontalProbe, rows: sourceRows, columns: sourceColumns) != nil ? .sequence : .copy
+        for column in sourceColumns {
+            let probe = GridAddress(row: sourceRows.upperBound + 1, column: column)
+            if sequenceValue(at: probe, rows: sourceRows, columns: sourceColumns) != nil { return .sequence }
+        }
+        for row in sourceRows {
+            let probe = GridAddress(row: row, column: sourceColumns.upperBound + 1)
+            if sequenceValue(at: probe, rows: sourceRows, columns: sourceColumns) != nil { return .sequence }
+        }
+        return .copy
     }
     @discardableResult
     func fillFromHandle(to targetRow: Int, targetColumn: Int) -> Bool {
@@ -1082,8 +1110,17 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                 // typing replaces the selected cell immediately. Further
                 // characters in the same typing session append to that first
                 // character, without opening a field editor or showing a caret.
-                // Let NSTextInputClient handle it first so Chinese/Japanese/
-                // Korean composition and their candidate windows work too.
+                // ASCII digits are committed directly when there is no visible
+                // IME composition. Some Chinese input methods temporarily keep
+                // a first digit as marked text; sending the next digit through
+                // interpretKeyEvents then replaces it, so direct numeric entry
+                // must bypass that path. Once marked text exists, digits still
+                // go to the IME so candidate selection keeps working.
+                let isASCIIDigit = typed.unicodeScalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
+                if isASCIIDigit && !hasMarkedText() {
+                    enterDirectText(typed, editor: editor)
+                    return
+                }
                 handledTextInputEvent = false
                 interpretKeyEvents([event])
                 if !handledTextInputEvent && !hasMarkedText() {
@@ -1487,20 +1524,37 @@ final class FrozenGridView: NSView {
         super.layout()
         if regions.count == 1 {
             regions[0].scroll.frame = bounds
+            regions[0].scroll.hasHorizontalScroller = true
+            regions[0].scroll.hasVerticalScroller = true
             updateFillOptionsButton()
             return
         }
         guard regions.count == 4 else { return }
         let frozenWidth = (0..<min(model.frozenColumns, model.columnCount - 1)).reduce(CGFloat(49)) { $0 + (model.columnWidths[$1] ?? 140) + 1 } * model.zoom
         let frozenHeight = model.frozenRows == 0 ? 0 : ((0..<min(model.frozenRows, model.rowCount - 1)).reduce(CGFloat(23)) { $0 + model.displayRowHeight($1) + 1 }) * model.zoom
-        // Large frozen ranges get their own scrollable region rather than hiding the body.
-        let w = min(frozenWidth, max(49, bounds.width * 0.55))
-        let h = min(frozenHeight, max(0, bounds.height * 0.55))
+        // Keep part of the live body visible even when many rows or columns
+        // are frozen. If the frozen area is larger than its viewport, its own
+        // scroll view exposes the remaining frozen content instead of cutting
+        // it off at an arbitrary percentage of the window.
+        let bodyMinimumWidth: CGFloat = 180
+        let bodyMinimumHeight: CGFloat = 140
+        let w = min(frozenWidth, max(49, bounds.width - bodyMinimumWidth))
+        let h = min(frozenHeight, max(23, bounds.height - bodyMinimumHeight))
+        let frozenWidthOverflows = frozenWidth > w + 0.5
+        let frozenHeightOverflows = frozenHeight > h + 0.5
         regions[0].scroll.frame = NSRect(x: 0, y: 0, width: w, height: h)
         regions[1].scroll.frame = NSRect(x: w, y: 0, width: max(0, bounds.width-w), height: h)
         regions[2].scroll.frame = NSRect(x: 0, y: h, width: w, height: max(0, bounds.height-h))
         regions[3].scroll.frame = NSRect(x: w, y: h, width: max(0, bounds.width-w), height: max(0, bounds.height-h))
         regions[0].scroll.isHidden = h == 0; regions[1].scroll.isHidden = h == 0
+        for (index, region) in regions.enumerated() {
+            let isBody = index == 3
+            let needsFrozenHorizontalScroll = frozenWidthOverflows && (index == 0 || index == 2)
+            let needsFrozenVerticalScroll = frozenHeightOverflows && (index == 0 || index == 1)
+            region.scroll.scrollerStyle = .overlay
+            region.scroll.hasHorizontalScroller = isBody || needsFrozenHorizontalScroll
+            region.scroll.hasVerticalScroller = isBody || needsFrozenVerticalScroll
+        }
         updateFillOptionsButton()
     }
     func sync(from index: Int) {
@@ -1528,7 +1582,28 @@ final class WorksheetScrollView: NSScrollView {
         if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
             window?.makeFirstResponder(nil)
             if let editor { editor.setZoom(editor.zoom * exp(-event.scrollingDeltaY * 0.01)) }
-        } else { super.scrollWheel(with: event) }
+            return
+        }
+
+        // Consume wheel/trackpad events locally. When this AppKit view is
+        // embedded in the SwiftUI horizontal scroll view used for multi-table
+        // mode, forwarding the event to the responder chain lets the outer
+        // pane switcher move together with the table contents. Clamp the
+        // document origin here so only this table (and its synchronized frozen
+        // regions) responds.
+        let clip = contentView
+        let documentSize = documentView?.frame.size ?? .zero
+        let visibleSize = clip.bounds.size
+        let maximum = NSPoint(x: max(0, documentSize.width - visibleSize.width),
+                              y: max(0, documentSize.height - visibleSize.height))
+        let origin = clip.bounds.origin
+        let target = NSPoint(
+            x: min(max(0, origin.x - event.scrollingDeltaX), maximum.x),
+            y: min(max(0, origin.y - event.scrollingDeltaY), maximum.y))
+        if target != origin {
+            clip.scroll(to: target)
+            reflectScrolledClipView(clip)
+        }
     }
 }
 

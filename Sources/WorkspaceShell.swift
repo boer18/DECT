@@ -120,7 +120,7 @@ struct TableWorkspaceView: View {
                                             pane(id).frame(width: max(390, (area.size.width - CGFloat(workspace.openIDs.count - 1)) / CGFloat(max(1, workspace.openIDs.count))), height: max(1, area.size.height - 14))
                                         }
                                     }.frame(height: max(1, area.size.height - 14)).background(Color(nsColor: .separatorColor))
-                                }.frame(width: area.size.width, height: area.size.height)
+                                }.frame(width: area.size.width, height: area.size.height).clipped()
                             } else if let id = workspace.activeID {
                                 pane(id).frame(width: area.size.width, height: area.size.height)
                             }
