@@ -183,6 +183,41 @@ enum WorkspaceSmokeTests {
         if !condition() { throw WorkspaceError(message: message) }
     }
 
+    @MainActor static func translationSettings() throws {
+        let suiteName = "io.centurygames.one-click-table-export.translation-smoke-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw WorkspaceError(message: "无法创建翻译设置 smoke suite")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        try TranslationSettingsStore.save(
+            apiKeyInput: "  smoke-api-key-123  ",
+            endpoint: "https://example.invalid/v1/chat/completions",
+            model: "smoke-model",
+            defaults: defaults
+        )
+        let saved = TranslationSettingsStore.load(defaults: defaults)
+        try require(saved.apiKey == "smoke-api-key-123" && saved.keySourceDescription == "本机设置",
+                    "API Key 未写入普通本机设置")
+        try require(saved.endpoint == "https://example.invalid/v1/chat/completions" && saved.model == "smoke-model",
+                    "翻译 API 普通设置未写入")
+
+        guard let reloadedDefaults = UserDefaults(suiteName: suiteName) else {
+            throw WorkspaceError(message: "无法重新打开翻译设置 smoke suite")
+        }
+        let reloaded = TranslationSettingsStore.load(defaults: reloadedDefaults)
+        try require(reloaded.apiKey == "smoke-api-key-123", "API Key 重载后没有保留")
+        try TranslationSettingsStore.save(
+            apiKeyInput: "",
+            endpoint: reloaded.endpoint,
+            model: reloaded.model,
+            defaults: reloadedDefaults
+        )
+        try require(TranslationSettingsStore.load(defaults: reloadedDefaults).apiKey == "smoke-api-key-123",
+                    "保存其他设置时错误清空了已有 API Key")
+        print("翻译 API Key 普通本机设置写入、重载和留空保留通过；未访问钥匙串。")
+    }
+
     @MainActor static func gridGeometry() throws {
         let sheet = GridSheet(name: "Sheet1", archivePath: "xl/worksheets/sheet1.xml")
         let cells = Dictionary(uniqueKeysWithValues: (0..<40).flatMap { row in

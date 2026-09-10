@@ -107,7 +107,7 @@ enum AppHelpContent {
             icon: "character.book.closed",
             summary: "读取当前项目主 TbLanguage.xlsx，批量补齐缺失翻译、保存并导表，还可以做翻译一致性检查。",
             blocks: [
-                AppHelpBlock("翻译前设置", text: "第一次使用翻译功能时，工具会提示打开“翻译 API 设置”。每位使用者都需要填写本工具自己的 API Key；Key 保存在本机 macOS 钥匙串中，API URL 和 Model 等非敏感设置会保存在本机。工具不会读取或复用 TCST 的 Key。"),
+                AppHelpBlock("翻译前设置", text: "第一次使用翻译功能时，工具会提示打开“翻译 API 设置”。每位使用者都需要填写本工具自己的 API Key；Key、API URL 和 Model 会保存在本工具的本机设置中。工具不会读取或复用 TCST 的 Key。"),
                 AppHelpBlock("顶部操作", bullets: [
                     "“翻译全部缺失”只处理当前项目中空白的语言单元格。",
                     "“保存全部”把当前草稿直接写回 TbLanguage.xlsx，不生成备份。",

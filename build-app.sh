@@ -25,7 +25,6 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR"
   -parse-as-library \
   -O \
   -framework AppKit \
-  -framework Security \
   -framework SwiftUI \
   "$SCRIPT_DIR"/Sources/*.swift \
   -o "$MACOS_DIR/OneClickTableExport"

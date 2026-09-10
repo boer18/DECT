@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import Foundation
-import Security
 import SwiftUI
 
 struct ExportProject: Identifiable, Hashable {
@@ -830,24 +829,23 @@ struct TranslationSettingsError: LocalizedError {
 }
 
 enum TranslationSettingsStore {
+    private static let apiKeyDefaultsKey = "translationAPIKey"
     private static let endpointDefaultsKey = "translationAPIEndpoint"
     private static let modelDefaultsKey = "translationAPIModel"
-    private static let keychainService = "com.centurygames.one-click-table-export.translation"
-    private static let keychainAccount = "translation-api-key"
     private static let legacySuiteName = "com.unity3d.UnityEditor5.x"
 
-    static func load() -> TranslationAPIConfiguration {
+    static func load(defaults: UserDefaults = .standard) -> TranslationAPIConfiguration {
         let legacyDefaults = UserDefaults(suiteName: legacySuiteName)
         // The API key belongs to this app and must be entered by each user.
         // Keep the legacy suite only for non-sensitive endpoint/model defaults;
         // never read or fall back to TCST's LanguageTool key.
-        let ownKey = keychainValue().map(stripWhitespace)
-        let endpoint = UserDefaults.standard.string(forKey: endpointDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ownKey = defaults.string(forKey: apiKeyDefaultsKey).map(stripWhitespace)
+        let endpoint = defaults.string(forKey: endpointDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyEndpoint = legacyDefaults?.string(forKey: "LanguageTool_ApiUrl")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = UserDefaults.standard.string(forKey: modelDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = defaults.string(forKey: modelDefaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyModel = legacyDefaults?.string(forKey: "LanguageTool_Model")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let apiKey = ownKey ?? ""
-        let keySource = apiKey.isEmpty ? "未配置" : "本工具钥匙串"
+        let keySource = apiKey.isEmpty ? "未配置" : "本机设置"
         return TranslationAPIConfiguration(
             apiKey: apiKey,
             endpoint: endpoint?.isEmpty == false ? endpoint! : (legacyEndpoint?.isEmpty == false ? legacyEndpoint! : TranslationAPIConfiguration.defaultEndpoint),
@@ -856,7 +854,7 @@ enum TranslationSettingsStore {
         )
     }
 
-    static func save(apiKeyInput: String, endpoint: String, model: String) throws {
+    static func save(apiKeyInput: String, endpoint: String, model: String, defaults: UserDefaults = .standard) throws {
         let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard URL(string: cleanEndpoint)?.scheme?.hasPrefix("http") == true else {
@@ -866,50 +864,15 @@ enum TranslationSettingsStore {
             throw TranslationSettingsError(message: "请填写翻译模型名称。")
         }
         let cleanKey = stripWhitespace(apiKeyInput)
-        if !cleanKey.isEmpty { try saveKeychainValue(cleanKey) }
-        UserDefaults.standard.set(cleanEndpoint, forKey: endpointDefaultsKey)
-        UserDefaults.standard.set(cleanModel, forKey: modelDefaultsKey)
+        if !cleanKey.isEmpty { defaults.set(cleanKey, forKey: apiKeyDefaultsKey) }
+        defaults.set(cleanEndpoint, forKey: endpointDefaultsKey)
+        defaults.set(cleanModel, forKey: modelDefaultsKey)
     }
 
     private static func stripWhitespace(_ value: String) -> String {
         value.filter { !$0.isWhitespace && !$0.isNewline }
     }
 
-    private static func keychainValue() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8)
-        else { return nil }
-        return value
-    }
-
-    private static func saveKeychainValue(_ value: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
-        ]
-        let data = Data(value.utf8)
-        let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else {
-            throw TranslationSettingsError(message: "无法保存 API Key 到 macOS 钥匙串（错误 \(updateStatus)）。")
-        }
-        var addition = query
-        addition[kSecValueData as String] = data
-        let addStatus = SecItemAdd(addition as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw TranslationSettingsError(message: "无法保存 API Key 到 macOS 钥匙串（错误 \(addStatus)）。")
-        }
-    }
 }
 
 enum TranslationClient {
@@ -1631,7 +1594,7 @@ struct TranslationSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("翻译设置").font(.title2.weight(.semibold))
-            Text("本工具使用独立的 API Key。请每位使用者在这里填写自己的 Key；API URL 和 Model 会保存在本机设置中，Key 会保存在本工具专用的 macOS 钥匙串项目中。工具不会读取或复用 TCST 多语言工具的 API Key。")
+            Text("本工具使用独立的 API Key。请每位使用者在这里填写自己的 Key；API URL、Model 和 Key 都会保存在本工具的本机设置中。工具不会读取或复用 TCST 多语言工具的 API Key。")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -2987,6 +2950,11 @@ struct LanguageReaderSmokeTest {
             precondition(!AppUpdater.isNewer("v1.5.0", than: "1.6.0"))
             precondition(!AppUpdater.isNewer("v1.7.0-beta", than: "1.6.0"))
             print("更新版本比较：升级、相同版本、降级、多位版本号与预发布过滤通过")
+            return
+        }
+        if paths.first == "--translation-settings-smoke" {
+            do { try WorkspaceSmokeTests.translationSettings() }
+            catch { fputs("翻译设置回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
         if paths.first == "--comparison-smoke", paths.count == 2 {
