@@ -58,13 +58,29 @@ enum GridInsertAxis: String, Equatable {
     case rows
     case columns
 }
+enum GridStructureKind: Equatable {
+    case insert
+    case delete
+}
 struct GridInsertOperation: Equatable {
     let axis: GridInsertAxis
     /// Zero-based position in the worksheet as it exists when this operation
-    /// is applied. Keeping operations in order lets later insertions refer to
-    /// the coordinates the user actually sees.
+    /// is applied. Keeping operations in order lets later structural changes
+    /// refer to the coordinates the user actually sees.
     let index: Int
     let count: Int
+    let kind: GridStructureKind
+
+    init(axis: GridInsertAxis, index: Int, count: Int) {
+        self.init(axis: axis, index: index, count: count, kind: .insert)
+    }
+
+    init(axis: GridInsertAxis, index: Int, count: Int, kind: GridStructureKind) {
+        self.axis = axis
+        self.index = index
+        self.count = count
+        self.kind = kind
+    }
 }
 struct GridSearchEntry: Sendable {
     let address: GridAddress
@@ -156,16 +172,25 @@ enum GridWorkbookIO {
     }
 
     /// Convert a source worksheet coordinate to the visible coordinate after
-    /// the recorded insertions have been applied.
-    static func addressAfterInsertions(_ address: GridAddress,
-                                       insertions: [GridInsertOperation]) -> GridAddress {
+    /// the recorded structural changes have been applied. A nil result means
+    /// that the source cell was removed by a later deletion.
+    static func addressAfterOperations(_ address: GridAddress,
+                                       operations: [GridInsertOperation]) -> GridAddress? {
         var result = address
-        for insertion in insertions {
-            switch insertion.axis {
-            case .rows where result.row >= insertion.index:
-                result = GridAddress(row: result.row + insertion.count, column: result.column)
-            case .columns where result.column >= insertion.index:
-                result = GridAddress(row: result.row, column: result.column + insertion.count)
+        for operation in operations {
+            switch (operation.kind, operation.axis) {
+            case (.insert, .rows) where result.row >= operation.index:
+                result = GridAddress(row: result.row + operation.count, column: result.column)
+            case (.insert, .columns) where result.column >= operation.index:
+                result = GridAddress(row: result.row, column: result.column + operation.count)
+            case (.delete, .rows):
+                if result.row < operation.index { continue }
+                if result.row < operation.index + operation.count { return nil }
+                result = GridAddress(row: result.row - operation.count, column: result.column)
+            case (.delete, .columns):
+                if result.column < operation.index { continue }
+                if result.column < operation.index + operation.count { return nil }
+                result = GridAddress(row: result.row, column: result.column - operation.count)
             default:
                 break
             }
@@ -173,28 +198,47 @@ enum GridWorkbookIO {
         return result
     }
 
-    /// Convert a visible coordinate back to a source coordinate. A nil result
-    /// means that the coordinate belongs to a newly inserted blank row/column.
-    static func addressBeforeInsertions(_ address: GridAddress,
-                                        insertions: [GridInsertOperation]) -> GridAddress? {
+    /// Convert a visible coordinate back to the coordinate before the recorded
+    /// structural changes. A nil result means that the visible cell belongs to
+    /// a newly inserted blank row/column.
+    static func addressBeforeOperations(_ address: GridAddress,
+                                        operations: [GridInsertOperation]) -> GridAddress? {
         var result = address
-        for insertion in insertions.reversed() {
-            switch insertion.axis {
-            case .rows:
-                if result.row >= insertion.index + insertion.count {
-                    result = GridAddress(row: result.row - insertion.count, column: result.column)
-                } else if result.row >= insertion.index {
+        for operation in operations.reversed() {
+            switch (operation.kind, operation.axis) {
+            case (.insert, .rows):
+                if result.row >= operation.index + operation.count {
+                    result = GridAddress(row: result.row - operation.count, column: result.column)
+                } else if result.row >= operation.index {
                     return nil
                 }
-            case .columns:
-                if result.column >= insertion.index + insertion.count {
-                    result = GridAddress(row: result.row, column: result.column - insertion.count)
-                } else if result.column >= insertion.index {
+            case (.insert, .columns):
+                if result.column >= operation.index + operation.count {
+                    result = GridAddress(row: result.row, column: result.column - operation.count)
+                } else if result.column >= operation.index {
                     return nil
                 }
+            case (.delete, .rows) where result.row >= operation.index:
+                result = GridAddress(row: result.row + operation.count, column: result.column)
+            case (.delete, .columns) where result.column >= operation.index:
+                result = GridAddress(row: result.row, column: result.column + operation.count)
+            default:
+                break
             }
         }
         return result
+    }
+
+    // Keep the old names as source-compatible helpers for insertion-only
+    // callers and existing smoke tests.
+    static func addressAfterInsertions(_ address: GridAddress,
+                                       insertions: [GridInsertOperation]) -> GridAddress {
+        addressAfterOperations(address, operations: insertions) ?? address
+    }
+
+    static func addressBeforeInsertions(_ address: GridAddress,
+                                        insertions: [GridInsertOperation]) -> GridAddress? {
+        addressBeforeOperations(address, operations: insertions)
     }
 
     static func save(_ snapshot: GridSnapshot, changes: [GridAddress: String], formulaAddresses: Set<GridAddress> = [], insertions: [GridInsertOperation] = []) throws -> GridSnapshot {
@@ -229,25 +273,47 @@ enum GridWorkbookIO {
             guard let value = row.attribute(forName: "r")?.stringValue else { return nil }
             return Int(value)
         }
-        func updateCellReferences(in row: XMLElement, axis: GridInsertAxis, index: Int, count: Int) {
+        func updateCellReferences(in row: XMLElement, axis: GridInsertAxis, index: Int,
+                                  count: Int, kind: GridStructureKind) {
             for cell in elements(row, "c") {
                 guard let reference = cell.attribute(forName: "r")?.stringValue,
                       let address = GridAddress(reference) else { continue }
-                let shifted: GridAddress
-                switch axis {
-                case .rows:
+                let shifted: GridAddress?
+                switch (kind, axis) {
+                case (.insert, .rows):
                     shifted = address.row >= index
                         ? GridAddress(row: address.row + count, column: address.column)
                         : address
-                case .columns:
+                case (.insert, .columns):
                     shifted = address.column >= index
                         ? GridAddress(row: address.row, column: address.column + count)
                         : address
+                case (.delete, .rows):
+                    if address.row >= index && address.row < index + count {
+                        shifted = nil
+                    } else if address.row >= index + count {
+                        shifted = GridAddress(row: address.row - count, column: address.column)
+                    } else {
+                        shifted = address
+                    }
+                case (.delete, .columns):
+                    if address.column >= index && address.column < index + count {
+                        shifted = nil
+                    } else if address.column >= index + count {
+                        shifted = GridAddress(row: address.row, column: address.column - count)
+                    } else {
+                        shifted = address
+                    }
                 }
-                if shifted != address { attribute(cell, "r", shifted.reference) }
+                if let shifted {
+                    if shifted != address { attribute(cell, "r", shifted.reference) }
+                } else {
+                    cell.detach()
+                }
             }
         }
-        func shiftedFormula(_ value: String, axis: GridInsertAxis, index: Int, count: Int) -> String {
+        func shiftedFormula(_ value: String, axis: GridInsertAxis, index: Int,
+                            count: Int, kind: GridStructureKind) -> String {
             guard let regex = try? NSRegularExpression(
                 pattern: "(?<![A-Za-z0-9_])(\\$?)([A-Za-z]{1,3})(\\$?)([0-9]+)") else { return value }
             let original = value as NSString
@@ -259,19 +325,40 @@ enum GridWorkbookIO {
                 let letters = original.substring(with: match.range(at: 2)).uppercased()
                 guard let row = Int(original.substring(with: match.range(at: 4))) else { continue }
                 let column = letters.unicodeScalars.reduce(0) { $0 * 26 + Int($1.value) - 64 } - 1
-                let shiftedRow = axis == .rows && row - 1 >= index ? row + count : row
-                let shiftedColumn = axis == .columns && column >= index ? column + count : column
-                let replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(shiftedColumn))\(original.substring(with: match.range(at: 3)))\(shiftedRow)"
+                let replacement: String
+                switch (kind, axis) {
+                case (.insert, .rows):
+                    let shiftedRow = row - 1 >= index ? row + count : row
+                    replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(column))\(original.substring(with: match.range(at: 3)))\(shiftedRow)"
+                case (.insert, .columns):
+                    let shiftedColumn = column >= index ? column + count : column
+                    replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(shiftedColumn))\(original.substring(with: match.range(at: 3)))\(row)"
+                case (.delete, .rows):
+                    if row - 1 >= index && row - 1 < index + count {
+                        replacement = "#REF!"
+                    } else {
+                        let shiftedRow = row - 1 >= index + count ? row - count : row
+                        replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(column))\(original.substring(with: match.range(at: 3)))\(shiftedRow)"
+                    }
+                case (.delete, .columns):
+                    if column >= index && column < index + count {
+                        replacement = "#REF!"
+                    } else {
+                        let shiftedColumn = column >= index + count ? column - count : column
+                        replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(shiftedColumn))\(original.substring(with: match.range(at: 3)))\(row)"
+                    }
+                }
                 guard let stringRange = Range(match.range, in: result) else { continue }
                 result.replaceSubrange(stringRange, with: replacement)
             }
             return result
         }
-        func updateFormulaReferences(axis: GridInsertAxis, index: Int, count: Int) {
+        func updateFormulaReferences(axis: GridInsertAxis, index: Int, count: Int,
+                                     kind: GridStructureKind) {
             guard let formulaNodes = try? xml.nodes(forXPath: "//*[local-name()='f']") else { return }
             for case let formula as XMLElement in formulaNodes {
                 let old = formula.stringValue ?? ""
-                let updated = shiftedFormula(old, axis: axis, index: index, count: count)
+                let updated = shiftedFormula(old, axis: axis, index: index, count: count, kind: kind)
                 guard updated != old else { continue }
                 for child in (formula.children ?? []).reversed() { child.detach() }
                 textNode(formula, updated)
@@ -286,7 +373,7 @@ enum GridWorkbookIO {
             for row in existingRows.reversed() {
                 guard let number = rowNumber(row), number >= insertionRow else { continue }
                 attribute(row, "r", String(number + count))
-                updateCellReferences(in: row, axis: .rows, index: index, count: count)
+                updateCellReferences(in: row, axis: .rows, index: index, count: count, kind: .insert)
             }
             let insertionIndex = elements(sheetData, "row")
                 .first(where: { (rowNumber($0) ?? Int.max) >= insertionRow })?.index ?? sheetData.childCount
@@ -295,14 +382,76 @@ enum GridWorkbookIO {
                 attribute(row, "r", String(insertionRow + offset))
                 sheetData.insertChild(row, at: min(insertionIndex + offset, sheetData.childCount))
             }
-            updateFormulaReferences(axis: .rows, index: index, count: count)
+            updateFormulaReferences(axis: .rows, index: index, count: count, kind: .insert)
+        }
+        func deleteRows(at index: Int, count: Int) throws {
+            guard count > 0, index >= 0, index + count <= 1_048_576 else {
+                throw WorkspaceError(message: "删除行超出了 Excel 支持的范围。")
+            }
+            let firstRow = index + 1
+            let lastRow = index + count
+            for row in elements(sheetData, "row").reversed() {
+                guard let number = rowNumber(row) else { continue }
+                if number >= firstRow && number <= lastRow {
+                    row.detach()
+                } else if number > lastRow {
+                    attribute(row, "r", String(number - count))
+                    updateCellReferences(in: row, axis: .rows, index: index, count: count, kind: .delete)
+                }
+            }
+            updateFormulaReferences(axis: .rows, index: index, count: count, kind: .delete)
+        }
+        func rewriteColumnFormattingAfterDeletion(at index: Int, count: Int) {
+            guard let cols = elements(xml.rootElement()!, "cols").first else { return }
+            let firstColumn = index + 1
+            let lastColumn = index + count
+            var replacement: [XMLElement] = []
+
+            func copyColumn(_ column: XMLElement, min: Int, max: Int) -> XMLElement {
+                let copy = XMLElement(name: column.name ?? "col")
+                for attributeNode in column.attributes ?? [] {
+                    let name = attributeNode.name ?? attributeNode.localName ?? ""
+                    guard !name.isEmpty, name != "min", name != "max" else { continue }
+                    copy.addAttribute(XMLNode.attribute(
+                        withName: name,
+                        stringValue: attributeNode.stringValue ?? "") as! XMLNode)
+                }
+                attribute(copy, "min", String(min))
+                attribute(copy, "max", String(max))
+                return copy
+            }
+
+            for column in elements(cols, "col") {
+                guard let minValue = Int(column.attribute(forName: "min")?.stringValue ?? ""),
+                      let maxValue = Int(column.attribute(forName: "max")?.stringValue ?? "") else {
+                    replacement.append(column)
+                    continue
+                }
+                if maxValue < firstColumn {
+                    replacement.append(column)
+                } else if minValue > lastColumn {
+                    attribute(column, "min", String(minValue - count))
+                    attribute(column, "max", String(maxValue - count))
+                    replacement.append(column)
+                } else {
+                    if minValue < firstColumn {
+                        replacement.append(copyColumn(column, min: minValue, max: firstColumn - 1))
+                    }
+                    if maxValue > lastColumn {
+                        replacement.append(copyColumn(column, min: lastColumn + 1 - count,
+                                                     max: maxValue - count))
+                    }
+                }
+            }
+            for column in elements(cols, "col").reversed() { column.detach() }
+            for column in replacement { cols.addChild(column) }
         }
         func insertColumns(at index: Int, count: Int) throws {
             guard count > 0, index >= 0, index + count <= 16_384 else {
                 throw WorkspaceError(message: "插入列超出了 Excel 支持的范围。")
             }
             for row in elements(sheetData, "row") {
-                updateCellReferences(in: row, axis: .columns, index: index, count: count)
+                updateCellReferences(in: row, axis: .columns, index: index, count: count, kind: .insert)
             }
             // Keep existing column formatting ranges covering the inserted
             // columns. This matches Excel's useful visual behavior for blank
@@ -320,12 +469,24 @@ enum GridWorkbookIO {
                     }
                 }
             }
-            updateFormulaReferences(axis: .columns, index: index, count: count)
+            updateFormulaReferences(axis: .columns, index: index, count: count, kind: .insert)
         }
-        for insertion in insertions {
-            switch insertion.axis {
-            case .rows: try insertRows(at: insertion.index, count: insertion.count)
-            case .columns: try insertColumns(at: insertion.index, count: insertion.count)
+        func deleteColumns(at index: Int, count: Int) throws {
+            guard count > 0, index >= 0, index + count <= 16_384 else {
+                throw WorkspaceError(message: "删除列超出了 Excel 支持的范围。")
+            }
+            for row in elements(sheetData, "row") {
+                updateCellReferences(in: row, axis: .columns, index: index, count: count, kind: .delete)
+            }
+            rewriteColumnFormattingAfterDeletion(at: index, count: count)
+            updateFormulaReferences(axis: .columns, index: index, count: count, kind: .delete)
+        }
+        for operation in insertions {
+            switch (operation.kind, operation.axis) {
+            case (.insert, .rows): try insertRows(at: operation.index, count: operation.count)
+            case (.insert, .columns): try insertColumns(at: operation.index, count: operation.count)
+            case (.delete, .rows): try deleteRows(at: operation.index, count: operation.count)
+            case (.delete, .columns): try deleteColumns(at: operation.index, count: operation.count)
             }
         }
         var rows: [Int: XMLElement] = [:]
@@ -352,7 +513,7 @@ enum GridWorkbookIO {
             }
             for child in (cell.children ?? []).reversed() { child.detach() }
             let value = cleanText(rawText)
-            let sourceAddress = addressBeforeInsertions(address, insertions: insertions)
+            let sourceAddress = addressBeforeOperations(address, operations: insertions)
             if (formulaAddresses.contains(address) || sourceAddress.flatMap({ snapshot.cells[$0]?.formula }) == true), let formula = formulaBody(value) {
                 // XLSX stores formulas without the leading '='. Keep a string
                 // result type when the original formula used one; otherwise
@@ -385,16 +546,21 @@ enum GridWorkbookIO {
             }
         }
         if let dimension = elements(xml.rootElement()!, "dimension").first {
-            var maxRow = max(0, snapshot.rowCount - 1)
-            var maxColumn = max(0, snapshot.columnCount - 1)
-            for insertion in insertions {
-                switch insertion.axis {
-                case .rows: maxRow += insertion.count
-                case .columns: maxColumn += insertion.count
+            var dimensionRowCount = max(1, snapshot.rowCount)
+            var dimensionColumnCount = max(1, snapshot.columnCount)
+            for operation in insertions {
+                switch (operation.kind, operation.axis) {
+                case (.insert, .rows): dimensionRowCount += operation.count
+                case (.insert, .columns): dimensionColumnCount += operation.count
+                case (.delete, .rows) where operation.index < dimensionRowCount:
+                    dimensionRowCount = max(1, dimensionRowCount - min(operation.count, dimensionRowCount - operation.index))
+                case (.delete, .columns) where operation.index < dimensionColumnCount:
+                    dimensionColumnCount = max(1, dimensionColumnCount - min(operation.count, dimensionColumnCount - operation.index))
+                default: break
                 }
             }
-            maxRow = max(maxRow, changes.keys.map(\.row).max() ?? 0)
-            maxColumn = max(maxColumn, changes.keys.map(\.column).max() ?? 0)
+            let maxRow = max(dimensionRowCount - 1, changes.keys.map(\.row).max() ?? 0)
+            let maxColumn = max(dimensionColumnCount - 1, changes.keys.map(\.column).max() ?? 0)
             attribute(dimension, "ref", "A1:\(GridAddress(row: maxRow, column: maxColumn).reference)")
         }
         let data = xml.xmlData(options: [.nodePreserveAll])
@@ -407,7 +573,7 @@ enum GridWorkbookIO {
         let validated = try read(replacement, sheetPath: snapshot.sheet.archivePath)
         for (address, text) in changes {
             let clean = cleanText(text)
-            let sourceAddress = addressBeforeInsertions(address, insertions: insertions)
+            let sourceAddress = addressBeforeOperations(address, operations: insertions)
             if (formulaAddresses.contains(address) || sourceAddress.flatMap({ snapshot.cells[$0]?.formula }) == true), let expectedFormula = formulaBody(clean) {
                 guard validated.cells[address]?.formula == true,
                       validated.cells[address]?.formulaText == expectedFormula else {
@@ -421,7 +587,7 @@ enum GridWorkbookIO {
             }
         }
         for (sourceAddress, cell) in snapshot.cells {
-            let address = addressAfterInsertions(sourceAddress, insertions: insertions)
+            guard let address = addressAfterOperations(sourceAddress, operations: insertions) else { continue }
             guard changes[address] == nil else { continue }
             guard validated.cells[address]?.text == cell.text, validated.cells[address]?.formula == cell.formula else {
                 throw WorkspaceError(message: "相邻单元格核验失败，原表未修改。")
@@ -543,15 +709,33 @@ final class GridEditorModel: ObservableObject {
     var onActivate: (() -> Void)?
     private var axisSelection: String?
     var hasPendingChanges: Bool { !changes.isEmpty || !insertions.isEmpty }
-    private var insertedRowCount: Int { insertions.filter { $0.axis == .rows }.reduce(0) { $0 + $1.count } }
-    private var insertedColumnCount: Int { insertions.filter { $0.axis == .columns }.reduce(0) { $0 + $1.count } }
+    private func structuralRowCount() -> Int {
+        var count = snapshot?.rowCount ?? 0
+        for operation in insertions where operation.axis == .rows {
+            switch operation.kind {
+            case .insert: count += operation.count
+            case .delete: count = max(1, count - min(operation.count, max(0, count - operation.index)))
+            }
+        }
+        return max(1, count)
+    }
+    private func structuralColumnCount() -> Int {
+        var count = snapshot?.columnCount ?? 0
+        for operation in insertions where operation.axis == .columns {
+            switch operation.kind {
+            case .insert: count += operation.count
+            case .delete: count = max(1, count - min(operation.count, max(0, count - operation.index)))
+            }
+        }
+        return max(1, count)
+    }
     var usedRowCount: Int {
-        let sourceCount = (snapshot?.rowCount ?? 0) + insertedRowCount
+        let sourceCount = structuralRowCount()
         let editedCount = (changes.keys.map(\.row).max() ?? -1) + 1
         return max(1, max(sourceCount, editedCount))
     }
     var usedColumnCount: Int {
-        let sourceCount = (snapshot?.columnCount ?? 0) + insertedColumnCount
+        let sourceCount = structuralColumnCount()
         let editedCount = (changes.keys.map(\.column).max() ?? -1) + 1
         return min(256, max(1, max(sourceCount, editedCount)))
     }
@@ -651,6 +835,57 @@ final class GridEditorModel: ObservableObject {
         revision += 1; message = "已插入 \(count) \(axis == .rows ? "行" : "列")，可用 ⌘Z 撤销。"; isError = false
         refreshSearch()
     }
+    func remove(axis: GridInsertAxis, at index: Int, count: Int) {
+        guard !isBusy, snapshot != nil else { return }
+        let currentLimit = axis == .rows ? usedRowCount : usedColumnCount
+        let excelLimit = axis == .rows ? 1_048_576 : 16_384
+        guard count > 0, index >= 0, index + count <= currentLimit, index + count <= excelLimit else {
+            message = axis == .rows
+                ? "删除行超出了当前表格范围。"
+                : "删除列超出了当前表格范围。"
+            isError = true
+            return
+        }
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
+        if history.count > 50 { history.removeFirst() }
+        redoHistory = []
+
+        func remainingAddress(_ address: GridAddress) -> GridAddress? {
+            switch axis {
+            case .rows:
+                if address.row >= index && address.row < index + count { return nil }
+                if address.row >= index + count {
+                    return GridAddress(row: address.row - count, column: address.column)
+                }
+            case .columns:
+                if address.column >= index && address.column < index + count { return nil }
+                if address.column >= index + count {
+                    return GridAddress(row: address.row, column: address.column - count)
+                }
+            }
+            return address
+        }
+        changes = changes.reduce(into: [:]) { result, entry in
+            if let address = remainingAddress(entry.key) { result[address] = entry.value }
+        }
+        formulaAddresses = Set(formulaAddresses.compactMap(remainingAddress))
+        insertions.append(GridInsertOperation(axis: axis, index: index, count: count, kind: .delete))
+        lastFill = nil; fillPreviewTarget = nil
+        switch axis {
+        case .rows:
+            let lastVisibleRow = max(0, usedRowCount - 1)
+            anchor = GridAddress(row: min(index, lastVisibleRow), column: 0)
+            extent = GridAddress(row: min(index, lastVisibleRow), column: usedColumnCount - 1)
+            axisSelection = "row"
+        case .columns:
+            let lastVisibleColumn = max(0, usedColumnCount - 1)
+            anchor = GridAddress(row: 0, column: min(index, lastVisibleColumn))
+            extent = GridAddress(row: usedRowCount - 1, column: min(index, lastVisibleColumn))
+            axisSelection = "column"
+        }
+        revision += 1; message = "已删除 \(count) \(axis == .rows ? "行" : "列")，可用 ⌘Z 撤销。"; isError = false
+        refreshSearch()
+    }
     private struct EditorState {
         let changes: [GridAddress: String]
         let formulaAddresses: Set<GridAddress>
@@ -709,7 +944,7 @@ final class GridEditorModel: ObservableObject {
 
     private func searchEntries() -> [GridSearchEntry] {
         guard let snapshot else { return [] }
-        let sourceAddresses = snapshot.cells.keys.map(displayAddress)
+        let sourceAddresses = snapshot.cells.keys.compactMap(displayAddress)
         let addresses = Set(sourceAddresses).union(changes.keys).sorted {
             ($0.row, $0.column) < ($1.row, $1.column)
         }
@@ -807,10 +1042,10 @@ final class GridEditorModel: ObservableObject {
         return min(256, max(baseline, required))
     }
     private func sourceAddress(_ address: GridAddress) -> GridAddress? {
-        GridWorkbookIO.addressBeforeInsertions(address, insertions: insertions)
+        GridWorkbookIO.addressBeforeOperations(address, operations: insertions)
     }
-    private func displayAddress(_ address: GridAddress) -> GridAddress {
-        GridWorkbookIO.addressAfterInsertions(address, insertions: insertions)
+    private func displayAddress(_ address: GridAddress) -> GridAddress? {
+        GridWorkbookIO.addressAfterOperations(address, operations: insertions)
     }
     func sourceText(_ address: GridAddress) -> String {
         guard let source = sourceAddress(address), let cell = snapshot?.cells[source] else { return "" }
@@ -1189,12 +1424,15 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
     private let countField: NSTextField
     private let stepper: NSStepper
     private let maximumCount: Int
-    private let insertAction: (Int) -> Void
+    private let actionVerb: String
+    private let action: (Int) -> Void
 
     init(title: String, systemImage: String, defaultCount: Int = 1,
-         maximumCount: Int, insertAction: @escaping (Int) -> Void) {
+         maximumCount: Int, actionVerb: String = "插入", iconColor: NSColor = .systemGreen,
+         action: @escaping (Int) -> Void) {
         self.maximumCount = max(1, maximumCount)
-        self.insertAction = insertAction
+        self.actionVerb = actionVerb
+        self.action = action
         titleButton = NSButton(title: title, target: nil, action: nil)
         countField = NSTextField(string: String(min(max(1, defaultCount), max(1, maximumCount))))
         stepper = NSStepper()
@@ -1203,7 +1441,7 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
         let imageView = NSImageView()
         imageView.image = Self.symbolImage(named: systemImage)
         imageView.imageScaling = .scaleProportionallyDown
-        imageView.contentTintColor = .systemGreen
+        imageView.contentTintColor = iconColor
         imageView.setAccessibilityLabel(title)
         addSubview(imageView)
 
@@ -1226,7 +1464,7 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
         countField.delegate = self
         countField.target = self
         countField.action = #selector(normalizeCountField(_:))
-        countField.setAccessibilityLabel("插入数量")
+        countField.setAccessibilityLabel("\(actionVerb)数量")
         addSubview(countField)
 
         stepper.minValue = 1
@@ -1238,7 +1476,7 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
         stepper.controlSize = .small
         stepper.target = self
         stepper.action = #selector(stepperChanged(_:))
-        stepper.setAccessibilityLabel("调整插入数量")
+        stepper.setAccessibilityLabel("调整\(actionVerb)数量")
         addSubview(stepper)
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -1299,7 +1537,7 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
     @objc private func insertFromMenu(_ sender: Any?) {
         let count = normalizedCount()
         presentingMenu?.cancelTracking()
-        insertAction(count)
+        action(count)
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
@@ -1311,7 +1549,20 @@ private struct GridInsertMenuItem {
     let title: String
     let systemImage: String
     let maximumCount: Int
+    let actionVerb: String
+    let iconColor: NSColor
     let action: (Int) -> Void
+
+    init(title: String, systemImage: String, maximumCount: Int,
+         actionVerb: String = "插入", iconColor: NSColor = .systemGreen,
+         action: @escaping (Int) -> Void) {
+        self.title = title
+        self.systemImage = systemImage
+        self.maximumCount = maximumCount
+        self.actionVerb = actionVerb
+        self.iconColor = iconColor
+        self.action = action
+    }
 }
 
 private func popUpGridInsertMenu(at point: NSPoint, in view: NSView,
@@ -1323,7 +1574,9 @@ private func popUpGridInsertMenu(at point: NSPoint, in view: NSView,
         let row = GridInsertMenuRowView(title: item.title,
                                         systemImage: item.systemImage,
                                         maximumCount: item.maximumCount,
-                                        insertAction: item.action)
+                                        actionVerb: item.actionVerb,
+                                        iconColor: item.iconColor,
+                                        action: item.action)
         menuItem.view = row
         menu.addItem(menuItem)
         row.presentingMenu = menu
@@ -1606,6 +1859,12 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                                maximumCount: max(1, 1_048_576 - (row + 1)),
                                action: { [weak editor] count in
                                    editor?.insert(axis: .rows, at: row + 1, count: count)
+                               }),
+            GridInsertMenuItem(title: "删除行", systemImage: "trash",
+                               maximumCount: max(1, editor.usedRowCount - row),
+                               actionVerb: "删除", iconColor: .systemRed,
+                               action: { [weak editor] count in
+                                   editor?.remove(axis: .rows, at: row, count: count)
                                })
         ])
     }
@@ -1769,6 +2028,12 @@ final class GridColumnHeader: NSTableHeaderView {
                                maximumCount: max(1, 256 - (c + 1)),
                                action: { [weak editor] count in
                                    editor?.insert(axis: .columns, at: c + 1, count: count)
+                               }),
+            GridInsertMenuItem(title: "删除列", systemImage: "trash",
+                               maximumCount: max(1, editor.usedColumnCount - c),
+                               actionVerb: "删除", iconColor: .systemRed,
+                               action: { [weak editor] count in
+                                   editor?.remove(axis: .columns, at: c, count: count)
                                })
         ])
     }

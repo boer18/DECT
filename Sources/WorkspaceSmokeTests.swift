@@ -345,6 +345,52 @@ enum WorkspaceSmokeTests {
             _ = try GridWorkbookIO.capture("/usr/bin/unzip", ["-tq", insertFile.path])
             print("行列插入：显示坐标映射、编辑、保存、撤销、重做与 ZIP 校验通过")
 
+            // Structural deletion uses the same visible-coordinate model as
+            // insertion. Exercise a mixed row/column deletion, cleanup of
+            // pending edits inside removed areas, undo/redo, persistence and
+            // the source-file safety guarantee.
+            let deleteFile = project.appendingPathComponent("Delete.xlsx")
+            try manager.copyItem(at: original, to: deleteFile)
+            let deleteSnapshot = try GridWorkbookIO.read(deleteFile)
+            guard let deleteSurvivor = deleteSnapshot.cells.keys
+                .sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) })
+                .first(where: { $0.row > 0 && $0.column > 0 && deleteSnapshot.cells[$0]?.formula == false }),
+                  let deleteSurvivorCell = deleteSnapshot.cells[deleteSurvivor] else {
+                throw WorkspaceError(message: "结构删除测试找不到可保留的普通单元格。")
+            }
+            let deleteEditor = GridEditorModel(); deleteEditor.snapshot = deleteSnapshot
+            deleteEditor.remove(axis: .rows, at: 0, count: 1)
+            deleteEditor.remove(axis: .columns, at: 0, count: 1)
+            guard let visibleSurvivor = GridWorkbookIO.addressAfterOperations(
+                deleteSurvivor, operations: deleteEditor.insertions) else {
+                throw WorkspaceError(message: "结构删除后的存活单元格坐标映射失败。")
+            }
+            try require(deleteEditor.sourceText(visibleSurvivor) == deleteSurvivorCell.text,
+                        "删除行列后原单元格内容映射失败")
+            try require(GridWorkbookIO.addressAfterOperations(
+                GridAddress(row: 0, column: 0), operations: deleteEditor.insertions) == nil,
+                        "被删除的源单元格仍然可见")
+            deleteEditor.edit([visibleSurvivor: "after delete"])
+            deleteEditor.undo()
+            try require(deleteEditor.inputText(visibleSurvivor) == deleteSurvivorCell.text &&
+                        deleteEditor.insertions.count == 2, "删除后的单元格编辑撤销失败")
+            deleteEditor.redo()
+            try require(deleteEditor.inputText(visibleSurvivor) == "after delete", "删除后的单元格编辑重做失败")
+            deleteEditor.undo(); deleteEditor.undo()
+            try require(deleteEditor.insertions.count == 1, "删除列结构撤销失败")
+            deleteEditor.redo(); deleteEditor.redo()
+            try require(deleteEditor.insertions.count == 2 &&
+                        deleteEditor.inputText(visibleSurvivor) == "after delete", "混合删除结构重做失败")
+            let deletedSnapshot = try GridWorkbookIO.save(deleteSnapshot,
+                changes: deleteEditor.changes,
+                formulaAddresses: deleteEditor.formulaAddresses,
+                insertions: deleteEditor.insertions)
+            try require(deletedSnapshot.cells[visibleSurvivor]?.text == "after delete" &&
+                        deletedSnapshot.cells[visibleSurvivor]?.formula == false,
+                        "行列删除写回或后续数据移动失败")
+            _ = try GridWorkbookIO.capture("/usr/bin/unzip", ["-tq", deleteFile.path])
+            print("行列删除：坐标映射、被删编辑清理、撤销、重做、保存与 ZIP 校验通过")
+
             // Formula editing: the editor exposes the raw formula with a
             // leading '=', and the writer stores the formula body in <f>.
             let formulaFile = project.appendingPathComponent("Formula.xlsx")
@@ -379,6 +425,45 @@ enum WorkspaceSmokeTests {
             try require(formulaSaved.cells[formulaAddress]?.formula == true &&
                         formulaSaved.cells[formulaAddress]?.formulaText == "SUM(1, 2)",
                         "公式写回 XLSX 失败")
+            let formulaDeleteEditor = GridEditorModel(); formulaDeleteEditor.snapshot = formulaSaved
+            formulaDeleteEditor.remove(axis: .rows, at: 1, count: 1)
+            let formulaDeleted = try GridWorkbookIO.save(formulaSaved,
+                changes: formulaDeleteEditor.changes,
+                formulaAddresses: formulaDeleteEditor.formulaAddresses,
+                insertions: formulaDeleteEditor.insertions)
+            try require(formulaDeleted.cells[formulaAddress]?.formulaText == "SUM(1, 2)",
+                        "删除无关行时公式被错误改写")
+
+            // A reference into a deleted row should become an explicit Excel
+            // error instead of silently pointing at a different cell.
+            let referenceFormulaFile = project.appendingPathComponent("ReferenceFormula.xlsx")
+            try manager.copyItem(at: original, to: referenceFormulaFile)
+            let referenceBase = try GridWorkbookIO.read(referenceFormulaFile)
+            var referenceCells = referenceBase.cells
+            let referenceCell = referenceCells[formulaAddress]
+            referenceCells[formulaAddress] = GridCell(
+                text: referenceCell?.text ?? "",
+                formula: true,
+                formulaText: "A2",
+                valueKind: referenceCell?.valueKind ?? "n")
+            let referenceSnapshot = GridSnapshot(
+                fileURL: referenceBase.fileURL,
+                fingerprint: referenceBase.fingerprint,
+                sheets: referenceBase.sheets,
+                sheet: referenceBase.sheet,
+                cells: referenceCells,
+                rowCount: referenceBase.rowCount,
+                columnCount: referenceBase.columnCount)
+            let referenceSaved = try GridWorkbookIO.save(referenceSnapshot,
+                changes: [formulaAddress: "=A2"])
+            let referenceDeleteEditor = GridEditorModel(); referenceDeleteEditor.snapshot = referenceSaved
+            referenceDeleteEditor.remove(axis: .rows, at: 1, count: 1)
+            let referenceDeleted = try GridWorkbookIO.save(referenceSaved,
+                changes: referenceDeleteEditor.changes,
+                formulaAddresses: referenceDeleteEditor.formulaAddresses,
+                insertions: referenceDeleteEditor.insertions)
+            try require(referenceDeleted.cells[formulaAddress]?.formulaText == "#REF!",
+                        "删除公式引用目标后未写入 #REF!")
             let searchEntries = [
                 GridSearchEntry(address: GridAddress(row: 0, column: 0), searchableText: "Reward 1"),
                 GridSearchEntry(address: GridAddress(row: 1, column: 2), searchableText: "REWARD 2"),
