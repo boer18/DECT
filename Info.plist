@@ -14,8 +14,8 @@
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>表格工具</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.8.1</string>
-  <key>CFBundleVersion</key><string>20260910.1</string>
+  <key>CFBundleShortVersionString</key><string>1.8.2</string>
+  <key>CFBundleVersion</key><string>20260910.2</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>

@@ -4,7 +4,7 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
-struct GridAddress: Hashable, Codable {
+struct GridAddress: Hashable, Codable, Sendable {
     let row: Int
     let column: Int
     var reference: String { "\(Self.columnName(column))\(row + 1)" }
@@ -53,6 +53,10 @@ struct GridFillRecord: Identifiable {
     let row: Int
     let column: Int
     let mode: GridFillMode
+}
+struct GridSearchEntry: Sendable {
+    let address: GridAddress
+    let searchableText: String
 }
 struct WorkspaceError: LocalizedError {
     let message: String
@@ -314,7 +318,15 @@ final class GridEditorModel: ObservableObject {
     @Published var showingFullContent = false
     @Published var lastFill: GridFillRecord?
     @Published var zoom: CGFloat = 1
+    @Published var searchText = ""
+    @Published private(set) var searchMatches: [GridAddress] = []
+    @Published private(set) var activeSearchIndex = -1
+    @Published private(set) var isSearching = false
     var fillPreviewTarget: GridAddress?
+    private var searchGeneration = 0
+    private var searchDebounce: DispatchWorkItem?
+    private(set) var searchMatchSet = Set<GridAddress>()
+    private(set) var searchRequest = 0
     func setZoom(_ value: CGFloat) { zoom = min(2.5, max(0.5, value)); revision += 1 }
     var columnWidths: [Int: CGFloat] = [:] { didSet { rowHeights.removeAll() } }
     @Published var adaptiveRows = false { didSet { rowHeights.removeAll(); revision += 1 } }
@@ -432,6 +444,7 @@ final class GridEditorModel: ObservableObject {
                 case .success(let updated):
                     self.snapshot = updated; self.observedStamp = Self.stamp(updated.fileURL)
                     self.history = []; self.redoHistory = []; self.formulaAddresses = []; self.revision += 1
+                    self.refreshSearch()
                     self.message = "已自动刷新外部修改"; self.isError = false
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
                 }
@@ -441,6 +454,96 @@ final class GridEditorModel: ObservableObject {
     var rows: ClosedRange<Int> { min(anchor.row, extent.row)...max(anchor.row, extent.row) }
     var columns: ClosedRange<Int> { min(anchor.column, extent.column)...max(anchor.column, extent.column) }
     var selectionLabel: String { "\(GridAddress(row: rows.lowerBound, column: columns.lowerBound).reference):\(GridAddress(row: rows.upperBound, column: columns.upperBound).reference)" }
+    var activeSearchAddress: GridAddress? {
+        guard searchMatches.indices.contains(activeSearchIndex) else { return nil }
+        return searchMatches[activeSearchIndex]
+    }
+    var searchSummary: String {
+        guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        if isSearching { return "搜索中…" }
+        guard !searchMatches.isEmpty else { return "无匹配" }
+        return "\(activeSearchIndex + 1)/\(searchMatches.count)"
+    }
+
+    private func searchEntries() -> [GridSearchEntry] {
+        guard let snapshot else { return [] }
+        let addresses = Set(snapshot.cells.keys).union(changes.keys).sorted {
+            ($0.row, $0.column) < ($1.row, $1.column)
+        }
+        return addresses.compactMap { address in
+            let visible = text(address)
+            let input = inputText(address)
+            let searchable = Array(Set([visible, input].filter { !$0.isEmpty })).joined(separator: "\n")
+            return searchable.isEmpty ? nil : GridSearchEntry(address: address, searchableText: searchable)
+        }
+    }
+
+    nonisolated static func matchingSearchAddresses(query: String, in entries: [GridSearchEntry]) -> [GridAddress] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+        return entries.filter { $0.searchableText.localizedCaseInsensitiveContains(normalized) }
+            .map { $0.address }
+            .sorted { ($0.row, $0.column) < ($1.row, $1.column) }
+    }
+
+    func refreshSearch() {
+        searchGeneration += 1
+        let generation = searchGeneration
+        searchDebounce?.cancel()
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, snapshot != nil else {
+            searchMatches = []
+            searchMatchSet = []
+            activeSearchIndex = -1
+            isSearching = false
+            searchRequest += 1
+            revision += 1
+            return
+        }
+
+        let entries = searchEntries()
+        searchMatches = []
+        searchMatchSet = []
+        activeSearchIndex = -1
+        isSearching = true
+        revision += 1
+        // Debounce fast typing, then scan off the main thread so a large
+        // workbook never blocks cell editing or scrolling.
+        let work = DispatchWorkItem { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let matches = Self.matchingSearchAddresses(query: query, in: entries)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.searchGeneration == generation else { return }
+                    self.searchMatches = matches
+                    self.searchMatchSet = Set(matches)
+                    self.activeSearchIndex = matches.isEmpty ? -1 : 0
+                    self.isSearching = false
+                    self.searchRequest += 1
+                    if let first = matches.first {
+                        self.anchor = first; self.extent = first; self.axisSelection = nil
+                    }
+                    self.revision += 1
+                }
+            }
+        }
+        searchDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    func nextSearchMatch() { moveSearchMatch(by: 1) }
+    func previousSearchMatch() { moveSearchMatch(by: -1) }
+
+    private func moveSearchMatch(by offset: Int) {
+        guard !searchMatches.isEmpty else { return }
+        let current = searchMatches.indices.contains(activeSearchIndex) ? activeSearchIndex : (offset > 0 ? -1 : 0)
+        let next = (current + offset + searchMatches.count) % searchMatches.count
+        activeSearchIndex = next
+        let address = searchMatches[next]
+        anchor = address; extent = address; axisSelection = nil
+        searchRequest += 1
+        revision += 1
+    }
+
     var canUndo: Bool { !history.isEmpty }
     var canRedo: Bool { !redoHistory.isEmpty }
     // Keep a stable virtual editing buffer around the source sheet. Growing
@@ -482,6 +585,7 @@ final class GridEditorModel: ObservableObject {
                     self.lastFill = nil; self.fillPreviewTarget = nil
                     self.observedStamp = Self.stamp(value.fileURL)
                     self.anchor = GridAddress(row: 0, column: 0); self.extent = self.anchor; self.revision += 1
+                    self.refreshSearch()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
                 }
             }
@@ -520,6 +624,7 @@ final class GridEditorModel: ObservableObject {
             }
         }
         revision += 1; message = nil; isError = false
+        refreshSearch()
     }
     private func isFormula(_ address: GridAddress) -> Bool {
         formulaAddresses.contains(address) || snapshot?.cells[address]?.formula == true
@@ -796,11 +901,13 @@ final class GridEditorModel: ObservableObject {
         guard let previous = history.popLast(), !isBusy else { return }
         redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
         changes = previous.changes; formulaAddresses = previous.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
+        refreshSearch()
     }
     func redo() {
         guard let next = redoHistory.popLast(), !isBusy else { return }
         history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
         changes = next.changes; formulaAddresses = next.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
+        refreshSearch()
     }
     func save(afterSave: (() -> Void)? = nil) {
         guard !isBusy, let snapshot else { return }
@@ -816,6 +923,7 @@ final class GridEditorModel: ObservableObject {
                     self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []
                     self.lastFill = nil; self.fillPreviewTarget = nil; self.revision += 1
                     self.observedStamp = Self.stamp(saved.fileURL)
+                    self.refreshSearch()
                     self.message = "已保存 \(updates.count) 个单元格"; afterSave?()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
                 }
@@ -1318,6 +1426,7 @@ final class FrozenGridView: NSView {
     var signature = ""
     var syncing = false
     var lastRevision = -1
+    private var lastSearchRequest = -1
     var fillOptionsButton: NSButton?
     var fillOptionsPopover: NSPopover?
     private var fillOptionsObservation: AnyCancellable?
@@ -1413,6 +1522,36 @@ final class FrozenGridView: NSView {
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
     }
 
+    private func revealActiveSearchMatchNow() {
+        guard let address = model.activeSearchAddress else { return }
+        guard let region = regions.first(where: {
+            $0.range.contains(address.row) &&
+            $0.table.tableColumns.contains { $0.identifier.rawValue == String(address.column) }
+        }) else { return }
+        layoutSubtreeIfNeeded()
+        let localRow = address.row - region.table.rowOffset
+        guard localRow >= 0, localRow < region.table.numberOfRows,
+              let localColumn = region.table.tableColumns.firstIndex(where: {
+                  $0.identifier.rawValue == String(address.column)
+              }) else { return }
+        region.table.scrollRowToVisible(localRow)
+        region.table.scrollColumnToVisible(localColumn)
+    }
+
+    private func revealActiveSearchMatchIfNeeded() {
+        guard model.searchRequest != lastSearchRequest else { return }
+        lastSearchRequest = model.searchRequest
+        guard model.activeSearchAddress != nil else { return }
+        revealActiveSearchMatchNow()
+        // Scroll restoration runs on the next main-loop turn when a search
+        // result updates the grid. Reveal once more after that restoration so
+        // a match far below the current viewport remains visible.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.lastSearchRequest == self.model.searchRequest else { return }
+            self.revealActiveSearchMatchNow()
+        }
+    }
+
     func update() {
         // Selection publishes a SwiftUI update immediately after double-click.
         // Reloading here would destroy AppKit's newly created field editor.
@@ -1506,6 +1645,7 @@ final class FrozenGridView: NSView {
             previousRegionCount: previousRegionCount,
             previousSignature: previousSignature,
             revision: revisionToRestore)
+        revealActiveSearchMatchIfNeeded()
     }
 
     private func restoreScrollPositions(_ origins: [NSPoint], previousRegionCount: Int,
@@ -1736,8 +1876,13 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         field.font = .systemFont(ofSize: 12 * model.zoom)
         let selected = model.rows.contains(r) && (c < 0 || model.columns.contains(c))
         let edited = model.changes[GridAddress(row: r, column: c)] != nil
-        field.drawsBackground = selected || edited || c < 0
-        field.backgroundColor = selected ? NSColor.controlAccentColor.withAlphaComponent(0.22)
+        let address = GridAddress(row: r, column: c)
+        let searchMatch = model.searchMatchSet.contains(address)
+        let activeSearchMatch = model.activeSearchAddress == address
+        field.drawsBackground = selected || edited || searchMatch || c < 0
+        field.backgroundColor = activeSearchMatch ? NSColor.systemYellow.withAlphaComponent(0.62)
+            : selected ? NSColor.controlAccentColor.withAlphaComponent(0.22)
+            : searchMatch ? NSColor.systemYellow.withAlphaComponent(0.22)
             : edited ? NSColor.systemOrange.withAlphaComponent(0.12) : .controlBackgroundColor
         field.textColor = c < 0 ? .secondaryLabelColor : .labelColor
         field.usesSingleLineMode = !model.adaptiveRows || c < 0
@@ -1760,6 +1905,37 @@ struct GridEditorPane: View {
                     Text(model.snapshot?.fileURL.lastPathComponent ?? "选择一张表").font(.headline).lineLimit(1)
                 }
                 Spacer()
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("搜索当前表格", text: $model.searchText)
+                        .textFieldStyle(.plain)
+                        .onSubmit { model.nextSearchMatch() }
+                        .help("搜索当前工作表中的单元格内容、公式或计算结果")
+                    if !model.searchText.isEmpty {
+                        Button { model.searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }.buttonStyle(.plain).foregroundStyle(.secondary).help("清除搜索")
+                    }
+                    if !model.searchSummary.isEmpty {
+                        Text(model.searchSummary)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Button { model.previousSearchMatch() } label: {
+                        Image(systemName: "chevron.up")
+                    }.buttonStyle(.plain)
+                        .disabled(model.searchMatches.isEmpty || model.isSearching)
+                        .help("上一个匹配")
+                    Button { model.nextSearchMatch() } label: {
+                        Image(systemName: "chevron.down")
+                    }.buttonStyle(.plain)
+                        .disabled(model.searchMatches.isEmpty || model.isSearching)
+                        .help("下一个匹配")
+                }
+                .padding(.horizontal, 8).frame(width: 290, height: 27)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
                 Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!model.canUndo || model.isBusy).help("撤销 ⌘Z")
                 Button("保存\(model.changes.isEmpty ? "" : "（\(model.changes.count)）")") { commit(); model.save() }
                     .buttonStyle(.borderedProminent).disabled(model.changes.isEmpty || model.isBusy)
@@ -1869,6 +2045,7 @@ struct GridEditorPane: View {
                     .allowsHitTesting(false)
             }
         }
+        .onChange(of: model.searchText) { _, _ in model.refreshSearch() }
     }
     private func commit() {
         NSApp.keyWindow?.makeFirstResponder(nil)

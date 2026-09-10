@@ -261,6 +261,74 @@ enum WorkspaceSmokeTests {
             try require(formulaSaved.cells[formulaAddress]?.formula == true &&
                         formulaSaved.cells[formulaAddress]?.formulaText == "SUM(1, 2)",
                         "公式写回 XLSX 失败")
+            let searchEntries = [
+                GridSearchEntry(address: GridAddress(row: 0, column: 0), searchableText: "Reward 1"),
+                GridSearchEntry(address: GridAddress(row: 1, column: 2), searchableText: "REWARD 2"),
+                GridSearchEntry(address: GridAddress(row: 3, column: 1), searchableText: "缓存值\n=SUM(A1, 2)")
+            ]
+            try require(GridEditorModel.matchingSearchAddresses(query: "reward", in: searchEntries) == [
+                GridAddress(row: 0, column: 0), GridAddress(row: 1, column: 2)],
+                "表格搜索未按大小写不敏感方式匹配或排序")
+            try require(GridEditorModel.matchingSearchAddresses(query: "sum(a1", in: searchEntries) == [
+                GridAddress(row: 3, column: 1)], "表格搜索未匹配公式文本")
+            try require(GridEditorModel.matchingSearchAddresses(query: "   ", in: searchEntries).isEmpty,
+                        "空白搜索词不应产生命中")
+            print("表格内搜索：大小写不敏感、公式文本、结果顺序与空白词处理通过")
+            let searchSheet = GridSheet(name: "Sheet1", archivePath: "xl/worksheets/sheet1.xml")
+            let searchCells: [GridAddress: GridCell] = [
+                GridAddress(row: 0, column: 0): GridCell(text: "Reward 1", formula: false),
+                GridAddress(row: 4, column: 2): GridCell(text: "Cached value", formula: true, formulaText: "SUM(A1, 2)")
+            ]
+            let searchSnapshot = GridSnapshot(
+                fileURL: URL(fileURLWithPath: "/tmp/table-search-smoke.xlsx"), fingerprint: Data(),
+                sheets: [searchSheet], sheet: searchSheet, cells: searchCells,
+                rowCount: 5, columnCount: 3)
+            let searchEditor = GridEditorModel(); searchEditor.snapshot = searchSnapshot
+            searchEditor.searchText = "reward"; searchEditor.refreshSearch()
+            let searchDeadline = Date().addingTimeInterval(1)
+            while searchEditor.isSearching && Date() < searchDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            try require(!searchEditor.isSearching && searchEditor.searchMatches == [GridAddress(row: 0, column: 0)] &&
+                        searchEditor.activeSearchAddress == GridAddress(row: 0, column: 0) &&
+                        searchEditor.anchor == GridAddress(row: 0, column: 0),
+                        "表格搜索异步结果或首个命中定位失败")
+            searchEditor.searchText = "cached"; searchEditor.refreshSearch()
+            let cachedDeadline = Date().addingTimeInterval(1)
+            while searchEditor.isSearching && Date() < cachedDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            try require(searchEditor.searchMatches == [GridAddress(row: 4, column: 2)],
+                        "表格搜索未匹配公式计算结果")
+            searchEditor.searchText = "sum(a1"; searchEditor.refreshSearch()
+            let formulaSearchDeadline = Date().addingTimeInterval(1)
+            while searchEditor.isSearching && Date() < formulaSearchDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            try require(searchEditor.searchMatches == [GridAddress(row: 4, column: 2)],
+                        "表格搜索未匹配公式文本")
+            searchEditor.searchText = "reward"; searchEditor.refreshSearch()
+            let navigationDeadline = Date().addingTimeInterval(1)
+            while searchEditor.isSearching && Date() < navigationDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            searchEditor.edit([GridAddress(row: 1, column: 1): "Reward 2"])
+            let editSearchDeadline = Date().addingTimeInterval(1)
+            while searchEditor.isSearching && Date() < editSearchDeadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            }
+            try require(searchEditor.searchMatches == [GridAddress(row: 0, column: 0), GridAddress(row: 1, column: 1)],
+                        "表格搜索未包含未保存编辑内容")
+            searchEditor.nextSearchMatch()
+            try require(searchEditor.activeSearchAddress == GridAddress(row: 1, column: 1),
+                        "表格搜索下一个命中定位失败")
+            searchEditor.nextSearchMatch()
+            try require(searchEditor.activeSearchAddress == GridAddress(row: 0, column: 0),
+                        "表格搜索循环定位失败")
+            searchEditor.previousSearchMatch()
+            try require(searchEditor.activeSearchAddress == GridAddress(row: 1, column: 1),
+                        "表格搜索上一个命中定位失败")
+            print("表格内搜索：异步扫描、计算结果、公式、未保存内容和循环定位通过")
             // A stale snapshot must never overwrite newer data.
             var blocked = false
             do { _ = try GridWorkbookIO.save(snapshot, changes: [GridAddress(row: 8, column: 3): "stale"]) }
