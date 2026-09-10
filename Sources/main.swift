@@ -2970,9 +2970,12 @@ struct LanguageReaderSmokeTest {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { app.stopModal(withCode: response) }
                 precondition(delegate.applicationShouldTerminate(app) == expected)
             }
+            WorkspaceApplicationDelegate.isTerminatingForUpdate = true
+            precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
+            WorkspaceApplicationDelegate.isTerminatingForUpdate = false
             precondition(window.contentView != nil)
             WorkspaceApplicationDelegate.hasUnsavedWork = nil
-            print("关闭按钮退出路由、最后窗口退出策略、无修改退出、取消/确认退出提示通过")
+            print("关闭按钮退出路由、最后窗口退出策略、无修改退出、取消/确认退出提示、更新交接退出保护通过")
             return
         }
         if paths.first == "--updater-smoke" {

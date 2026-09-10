@@ -357,11 +357,19 @@ struct WorkspaceCloseBehavior: NSViewRepresentable {
 
 final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
     static var hasUnsavedWork: (() -> Bool)?
+    // The updater has already validated the new bundle and handed replacement
+    // to the detached installer. At that point updater.busy must not be
+    // interpreted as unsaved user work, otherwise the installer waits for an
+    // application that is waiting for its own termination confirmation.
+    static var isTerminatingForUpdate = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.isTerminatingForUpdate = false
         UpdateInstaller.acknowledgeLaunch()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if Self.isTerminatingForUpdate { return .terminateNow }
         guard Self.hasUnsavedWork?() == true else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "还有未保存的表格修改或正在执行的任务"
