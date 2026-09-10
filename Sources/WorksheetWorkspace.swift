@@ -1183,17 +1183,152 @@ final class GridEditorModel: ObservableObject {
     }
 }
 
-final class GridInsertMenuTarget: NSObject {
-    private let action: () -> Void
+final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
+    weak var presentingMenu: NSMenu?
+    private let titleButton: NSButton
+    private let countField: NSTextField
+    private let stepper: NSStepper
+    private let maximumCount: Int
+    private let insertAction: (Int) -> Void
 
-    init(action: @escaping () -> Void) {
-        self.action = action
-        super.init()
+    init(title: String, systemImage: String, defaultCount: Int = 1,
+         maximumCount: Int, insertAction: @escaping (Int) -> Void) {
+        self.maximumCount = max(1, maximumCount)
+        self.insertAction = insertAction
+        titleButton = NSButton(title: title, target: nil, action: nil)
+        countField = NSTextField(string: String(min(max(1, defaultCount), max(1, maximumCount))))
+        stepper = NSStepper()
+        super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 28))
+
+        let imageView = NSImageView()
+        imageView.image = Self.symbolImage(named: systemImage)
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.contentTintColor = .systemGreen
+        imageView.setAccessibilityLabel(title)
+        addSubview(imageView)
+
+        titleButton.isBordered = false
+        titleButton.bezelStyle = .inline
+        titleButton.setButtonType(.momentaryPushIn)
+        titleButton.alignment = .left
+        titleButton.font = .systemFont(ofSize: 13)
+        titleButton.contentTintColor = .labelColor
+        titleButton.target = self
+        titleButton.action = #selector(insertFromMenu(_:))
+        titleButton.setAccessibilityLabel(title)
+        addSubview(titleButton)
+
+        countField.alignment = .right
+        countField.controlSize = .small
+        countField.font = .systemFont(ofSize: 12)
+        countField.bezelStyle = .roundedBezel
+        countField.focusRingType = .none
+        countField.delegate = self
+        countField.target = self
+        countField.action = #selector(normalizeCountField(_:))
+        countField.setAccessibilityLabel("插入数量")
+        addSubview(countField)
+
+        stepper.minValue = 1
+        stepper.maxValue = Double(self.maximumCount)
+        stepper.integerValue = countField.integerValue
+        stepper.increment = 1
+        stepper.valueWraps = false
+        stepper.autorepeat = true
+        stepper.controlSize = .small
+        stepper.target = self
+        stepper.action = #selector(stepperChanged(_:))
+        stepper.setAccessibilityLabel("调整插入数量")
+        addSubview(stepper)
+
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        titleButton.translatesAutoresizingMaskIntoConstraints = false
+        countField.translatesAutoresizingMaskIntoConstraints = false
+        stepper.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            imageView.widthAnchor.constraint(equalToConstant: 16),
+            imageView.heightAnchor.constraint(equalToConstant: 16),
+            stepper.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            stepper.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stepper.widthAnchor.constraint(equalToConstant: 22),
+            stepper.heightAnchor.constraint(equalToConstant: 19),
+            countField.trailingAnchor.constraint(equalTo: stepper.leadingAnchor, constant: -2),
+            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            countField.widthAnchor.constraint(equalToConstant: 45),
+            countField.heightAnchor.constraint(equalToConstant: 20),
+            titleButton.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
+            titleButton.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -6),
+            titleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleButton.heightAnchor.constraint(equalToConstant: 22)
+        ])
     }
 
-    @objc func invoke(_ sender: Any?) {
-        action()
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 232, height: 28) }
+
+    private static func symbolImage(named name: String) -> NSImage {
+        let candidates = [name, "rectangle.insert.row.above", "plus.rectangle"]
+        for candidate in candidates {
+            if let image = NSImage(systemSymbolName: candidate, accessibilityDescription: nil) {
+                image.isTemplate = true
+                return image
+            }
+        }
+        return NSImage(size: NSSize(width: 16, height: 16))
     }
+
+    private func normalizedCount() -> Int {
+        let parsed = Int(countField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1
+        let count = min(max(1, parsed), maximumCount)
+        countField.stringValue = String(count)
+        stepper.integerValue = count
+        return count
+    }
+
+    @objc private func normalizeCountField(_ sender: Any?) {
+        _ = normalizedCount()
+    }
+
+    @objc private func stepperChanged(_ sender: NSStepper) {
+        countField.stringValue = String(min(max(1, sender.integerValue), maximumCount))
+    }
+
+    @objc private func insertFromMenu(_ sender: Any?) {
+        let count = normalizedCount()
+        presentingMenu?.cancelTracking()
+        insertAction(count)
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        _ = normalizedCount()
+    }
+}
+
+private struct GridInsertMenuItem {
+    let title: String
+    let systemImage: String
+    let maximumCount: Int
+    let action: (Int) -> Void
+}
+
+private func popUpGridInsertMenu(at point: NSPoint, in view: NSView,
+                                 items: [GridInsertMenuItem]) {
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    for item in items {
+        let menuItem = NSMenuItem()
+        let row = GridInsertMenuRowView(title: item.title,
+                                        systemImage: item.systemImage,
+                                        maximumCount: item.maximumCount,
+                                        insertAction: item.action)
+        menuItem.view = row
+        menu.addItem(menuItem)
+        row.presentingMenu = menu
+    }
+    menu.popUp(positioning: nil, at: point, in: view)
 }
 
 final class CellGridTable: NSTableView, NSTextInputClient {
@@ -1207,19 +1342,6 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     private var markedAddress: GridAddress?
     private var markedBase = ""
     private var handledTextInputEvent = false
-    private var insertMenuTargets: [GridInsertMenuTarget] = []
-
-    private func showInsertMenu(at point: NSPoint, items: [(String, () -> Void)]) {
-        let menu = NSMenu()
-        insertMenuTargets = items.map { title, action in
-            let target = GridInsertMenuTarget(action: action)
-            let item = NSMenuItem(title: title, action: #selector(GridInsertMenuTarget.invoke(_:)), keyEquivalent: "")
-            item.target = target
-            menu.addItem(item)
-            return target
-        }
-        menu.popUp(positioning: nil, at: point, in: self)
-    }
 
     func endDirectTyping() {
         directTypingAddress = nil
@@ -1474,9 +1596,17 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         endDirectTyping()
         window?.makeFirstResponder(self)
         editor.selectRows(row, extending: false)
-        showInsertMenu(at: point, items: [
-            ("向上插入行…", { [weak editor] in editor?.promptInsert(axis: .rows, at: row, title: "向上插入行") }),
-            ("向下插入行…", { [weak editor] in editor?.promptInsert(axis: .rows, at: row + 1, title: "向下插入行") })
+        popUpGridInsertMenu(at: point, in: self, items: [
+            GridInsertMenuItem(title: "在上方插入行", systemImage: "rectangle.insert.row.above",
+                               maximumCount: max(1, 1_048_576 - row),
+                               action: { [weak editor] count in
+                                   editor?.insert(axis: .rows, at: row, count: count)
+                               }),
+            GridInsertMenuItem(title: "在下方插入行", systemImage: "rectangle.insert.row.below",
+                               maximumCount: max(1, 1_048_576 - (row + 1)),
+                               action: { [weak editor] count in
+                                   editor?.insert(axis: .rows, at: row + 1, count: count)
+                               })
         ])
     }
     override func mouseDragged(with event: NSEvent) {
@@ -1585,7 +1715,6 @@ final class GridColumnHeader: NSTableHeaderView {
     private var resizeStartX: CGFloat = 0
     private var resizeStartWidth: CGFloat = 0
     private(set) var appliedZoom: CGFloat = 1
-    private var insertMenuTargets: [GridInsertMenuTarget] = []
 
     func applyZoom(_ value: CGFloat) {
         let zoom = min(2.5, max(0.5, value))
@@ -1630,17 +1759,18 @@ final class GridColumnHeader: NSTableHeaderView {
         table.window?.makeFirstResponder(table)
         table.editor?.onActivate?()
         editor.selectColumns(c, extending: false)
-        let menu = NSMenu()
-        insertMenuTargets = [
-            GridInsertMenuTarget(action: { [weak editor] in editor?.promptInsert(axis: .columns, at: c, title: "向左插入列") }),
-            GridInsertMenuTarget(action: { [weak editor] in editor?.promptInsert(axis: .columns, at: c + 1, title: "向右插入列") })
-        ]
-        for (index, title) in ["向左插入列…", "向右插入列…"].enumerated() {
-            let item = NSMenuItem(title: title, action: #selector(GridInsertMenuTarget.invoke(_:)), keyEquivalent: "")
-            item.target = insertMenuTargets[index]
-            menu.addItem(item)
-        }
-        menu.popUp(positioning: nil, at: point, in: self)
+        popUpGridInsertMenu(at: point, in: self, items: [
+            GridInsertMenuItem(title: "在左侧插入列", systemImage: "rectangle.insert.column.left",
+                               maximumCount: max(1, 256 - c),
+                               action: { [weak editor] count in
+                                   editor?.insert(axis: .columns, at: c, count: count)
+                               }),
+            GridInsertMenuItem(title: "在右侧插入列", systemImage: "rectangle.insert.column.right",
+                               maximumCount: max(1, 256 - (c + 1)),
+                               action: { [weak editor] count in
+                                   editor?.insert(axis: .columns, at: c + 1, count: count)
+                               })
+        ])
     }
     override func mouseDragged(with event: NSEvent) {
         if let column = resizingColumn {
@@ -2110,7 +2240,10 @@ final class WorksheetScrollView: NSScrollView {
         let maximum = NSPoint(x: max(0, documentSize.width - visibleSize.width),
                               y: max(0, documentSize.height - visibleSize.height))
         let origin = clip.bounds.origin
-        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1.8 : 3.0
+        // Trackpad deltas are already pixel-precise; preserve their native
+        // feel. Mouse-wheel ticks need a stronger multiplier so a long table
+        // does not require many repeated notches to move between sections.
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 4.0
         let target = NSPoint(
             x: min(max(0, origin.x - event.scrollingDeltaX * multiplier), maximum.x),
             y: min(max(0, origin.y - event.scrollingDeltaY * multiplier), maximum.y))

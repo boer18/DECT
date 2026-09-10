@@ -17,6 +17,17 @@ struct CellDifference: Identifiable {
     let old: String?
     let new: String?
     var status: ComparisonStatus { old == nil ? .added : new == nil ? .removed : .changed }
+    /// The current-version address is the best navigation target. For a
+    /// deleted cell there is no current address, so fall back to the history
+    /// address. Whole-sheet markers intentionally have no target cell.
+    var primaryAddress: GridAddress? {
+        guard location != "整张工作表" else { return nil }
+        return location
+            .replacingOccurrences(of: "→", with: " ")
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .compactMap { GridAddress(String($0)) }
+            .last
+    }
 }
 struct ComparedFile: Identifiable {
     let relativePath: String
@@ -28,6 +39,9 @@ struct ComparedFile: Identifiable {
     let oldSheets: [ComparedSheet]
     let newSheets: [ComparedSheet]
     var id: String { relativePath }
+    var addedCount: Int { differences.filter { $0.status == .added }.count }
+    var removedCount: Int { differences.filter { $0.status == .removed }.count }
+    var modifiedCount: Int { differences.filter { $0.status == .changed }.count }
 }
 struct ComparedSheet {
     let name: String
@@ -131,6 +145,15 @@ struct ComparisonTableProjection {
     }
     func columnKind(_ column: Int) -> ComparisonCellKind {
         columnMarks[column] ?? .same
+    }
+    func matchingCount(query: String) -> Int {
+        guard !query.isEmpty else { return 0 }
+        var addresses = Set<GridAddress>()
+        if let oldSheet { addresses.formUnion(oldSheet.cells.keys) }
+        if let newSheet { addresses.formUnion(newSheet.cells.keys) }
+        return addresses.reduce(into: 0) { count, address in
+            if matches(address, query: query) { count += 1 }
+        }
     }
 }
 final class ComparisonCancellation: @unchecked Sendable {
@@ -332,6 +355,8 @@ final class FolderComparisonModel: ObservableObject {
     @Published var page = 0
     @Published var checkedFileIDs = Set<String>()
     @Published var comparisonZoom: CGFloat = 1.0
+    @Published var comparisonColumnWidths: [String: [Int: CGFloat]] = [:]
+    @Published var activeDifferenceIndex = 0
     @Published private(set) var gitRepository: GitRepositoryInfo?
     @Published private(set) var gitBranches: [GitBranch] = []
     @Published private(set) var gitCommits: [GitCommit] = []
@@ -382,6 +407,22 @@ final class FolderComparisonModel: ObservableObject {
     var visibleCells: [CellDifference] { selected?.differences.filter {
         (sheetFilter == "全部工作表" || $0.sheet == sheetFilter) && (cellQuery.isEmpty || "\($0.location) \($0.key) \($0.old ?? "") \($0.new ?? "")".localizedCaseInsensitiveContains(cellQuery))
     } ?? [] }
+    var selectedSheetDifferences: [CellDifference] {
+        guard let file = selected else { return [] }
+        let sheet = sheetFilter == "全部工作表" ? sheetNames(for: file).first : sheetFilter
+        guard let sheet else { return [] }
+        return file.differences.filter { $0.sheet == sheet }
+    }
+    var activeDifference: CellDifference? {
+        let changes = selectedSheetDifferences
+        guard !changes.isEmpty else { return nil }
+        return changes[min(max(0, activeDifferenceIndex), changes.count - 1)]
+    }
+    var activeDifferencePosition: Int? {
+        let changes = selectedSheetDifferences
+        guard !changes.isEmpty else { return nil }
+        return min(max(0, activeDifferenceIndex), changes.count - 1)
+    }
     var reviewFiles: [ComparedFile] { files.filter { $0.status != .same } }
     var checkedCount: Int { reviewFiles.reduce(0) { $0 + (checkedFileIDs.contains($1.id) ? 1 : 0) } }
     var checkedProgress: Double { reviewFiles.isEmpty ? 0 : Double(checkedCount) / Double(reviewFiles.count) }
@@ -395,6 +436,51 @@ final class FolderComparisonModel: ObservableObject {
     }
     func sheetNames(for file: ComparedFile) -> [String] {
         Set(file.oldSheets.map(\.name)).union(file.newSheets.map(\.name)).sorted()
+    }
+    func sheetHasDifferences(_ file: ComparedFile, name: String) -> Bool {
+        file.differences.contains { $0.sheet == name }
+    }
+    func sheetDifferenceColor(_ file: ComparedFile, name: String) -> Color {
+        let changes = file.differences.filter { $0.sheet == name }
+        if changes.contains(where: { $0.status == .changed }) { return .purple }
+        if changes.contains(where: { $0.status == .added }) { return .green }
+        if changes.contains(where: { $0.status == .removed }) { return .red }
+        return .clear
+    }
+    func matchingCellCount(for projection: ComparisonTableProjection) -> Int {
+        projection.matchingCount(query: cellQuery)
+    }
+    private func comparisonWidthKey(file: ComparedFile, sheetName: String) -> String {
+        "\(file.id)#\(sheetName)"
+    }
+    func comparisonWidths(for file: ComparedFile, sheetName: String) -> [Int: CGFloat] {
+        comparisonColumnWidths[comparisonWidthKey(file: file, sheetName: sheetName)] ?? [:]
+    }
+    func setComparisonColumnWidth(_ width: CGFloat, column: Int, file: ComparedFile, sheetName: String) {
+        let key = comparisonWidthKey(file: file, sheetName: sheetName)
+        var all = comparisonColumnWidths
+        var widths = all[key] ?? [:]
+        widths[column] = min(800, max(80, width))
+        all[key] = widths
+        comparisonColumnWidths = all
+    }
+    func moveDifference(_ offset: Int) {
+        let changes = selectedSheetDifferences
+        guard !changes.isEmpty else { return }
+        let current = min(max(0, activeDifferenceIndex), changes.count - 1)
+        activeDifferenceIndex = (current + offset + changes.count) % changes.count
+    }
+    func selectSheet(_ name: String) {
+        guard sheetFilter != name else { return }
+        sheetFilter = name
+        activeDifferenceIndex = 0
+    }
+    func finishReview() {
+        guard !isRunning else { return }
+        let count = files.count
+        releaseGitSnapshot()
+        resetComparisonResults()
+        status = count == 0 ? "当前没有待结束的对比。" : "已完成核对，已释放本次对比数据。"
     }
     func choose(old: Bool) {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
@@ -537,6 +623,8 @@ final class FolderComparisonModel: ObservableObject {
         selectedID = nil
         checkedFileIDs = []
         projectionCache = [:]
+        comparisonColumnWidths = [:]
+        activeDifferenceIndex = 0
         progress = 0
     }
 
@@ -653,7 +741,7 @@ final class FolderComparisonModel: ObservableObject {
         comparisonZoom = 1.0
     }
     func select(_ id: String?) {
-        selectedID = id; cellQuery = ""; page = 0
+        selectedID = id; cellQuery = ""; page = 0; activeDifferenceIndex = 0
         if let file = selected, let firstSheet = sheetNames(for: file).first { sheetFilter = firstSheet }
         else { sheetFilter = "全部工作表" }
     }
@@ -676,6 +764,8 @@ final class FolderComparisonModel: ObservableObject {
 private enum ComparisonCanvasMetrics {
     static let rowHeaderWidth: CGFloat = 54
     static let columnWidth: CGFloat = 150
+    static let minimumColumnWidth: CGFloat = 80
+    static let maximumColumnWidth: CGFloat = 800
     static let headerHeight: CGFloat = 28
     static let rowHeight: CGFloat = 58
     static let horizontalInset: CGFloat = 6
@@ -686,6 +776,12 @@ final class ComparisonTableContentView: NSView {
     private(set) var projection: ComparisonTableProjection?
     private(set) var query = ""
     private(set) var zoom: CGFloat = 1.0
+    private(set) var activeAddress: GridAddress?
+    private var columnWidths: [Int: CGFloat] = [:]
+    var onColumnResize: ((Int, CGFloat) -> Void)?
+    private var resizingColumn: Int?
+    private var resizeStartX: CGFloat = 0
+    private var resizeStartWidth: CGFloat = 0
 
     override var isFlipped: Bool { true }
 
@@ -699,13 +795,19 @@ final class ComparisonTableContentView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(projection: ComparisonTableProjection, query: String, zoom: CGFloat) {
+    func update(projection: ComparisonTableProjection, query: String, zoom: CGFloat,
+                columnWidths: [Int: CGFloat], activeAddress: GridAddress?,
+                onColumnResize: @escaping (Int, CGFloat) -> Void) {
         self.projection = projection
         self.query = query
         self.zoom = Self.clampedZoom(zoom)
-        let width = (ComparisonCanvasMetrics.rowHeaderWidth + CGFloat(projection.columnCount) * ComparisonCanvasMetrics.columnWidth) * self.zoom
+        self.columnWidths = columnWidths
+        self.activeAddress = activeAddress
+        self.onColumnResize = onColumnResize
+        let width = contentWidth(for: projection) * self.zoom
         let height = (ComparisonCanvasMetrics.headerHeight + CGFloat(projection.rowCount) * ComparisonCanvasMetrics.rowHeight) * self.zoom
         setFrameSize(NSSize(width: max(1, width), height: max(1, height)))
+        resetCursorRects()
         needsDisplay = true
     }
 
@@ -713,11 +815,120 @@ final class ComparisonTableContentView: NSView {
         guard abs(self.zoom - zoom) > 0.0001 else { return }
         self.zoom = Self.clampedZoom(zoom)
         if let projection {
-            let width = (ComparisonCanvasMetrics.rowHeaderWidth + CGFloat(projection.columnCount) * ComparisonCanvasMetrics.columnWidth) * self.zoom
+            let width = contentWidth(for: projection) * self.zoom
             let height = (ComparisonCanvasMetrics.headerHeight + CGFloat(projection.rowCount) * ComparisonCanvasMetrics.rowHeight) * self.zoom
             setFrameSize(NSSize(width: max(1, width), height: max(1, height)))
         }
         needsDisplay = true
+    }
+
+    private func columnWidth(_ column: Int) -> CGFloat {
+        min(ComparisonCanvasMetrics.maximumColumnWidth,
+            max(ComparisonCanvasMetrics.minimumColumnWidth,
+                columnWidths[column] ?? ComparisonCanvasMetrics.columnWidth))
+    }
+
+    func columnWidthForNavigation(_ column: Int) -> CGFloat {
+        columnWidth(column)
+    }
+
+    private func columnOrigin(_ column: Int) -> CGFloat {
+        ComparisonCanvasMetrics.rowHeaderWidth + (0..<max(0, column)).reduce(CGFloat.zero) {
+            $0 + columnWidth($1)
+        }
+    }
+
+    private func columnRect(_ column: Int) -> NSRect {
+        NSRect(x: columnOrigin(column), y: 0, width: columnWidth(column),
+               height: ComparisonCanvasMetrics.headerHeight)
+    }
+
+    private func contentWidth(for projection: ComparisonTableProjection) -> CGFloat {
+        ComparisonCanvasMetrics.rowHeaderWidth + (0..<projection.columnCount).reduce(CGFloat.zero) {
+            $0 + columnWidth($1)
+        }
+    }
+
+    private func cellRect(row: Int, column: Int) -> NSRect {
+        NSRect(x: columnOrigin(column),
+               y: ComparisonCanvasMetrics.headerHeight + CGFloat(row) * ComparisonCanvasMetrics.rowHeight,
+               width: columnWidth(column), height: ComparisonCanvasMetrics.rowHeight)
+    }
+
+    private func columnAt(logicalX: CGFloat, projection: ComparisonTableProjection) -> Int? {
+        guard logicalX >= ComparisonCanvasMetrics.rowHeaderWidth else { return nil }
+        for column in 0..<projection.columnCount {
+            let rect = columnRect(column)
+            if logicalX <= rect.maxX { return column }
+        }
+        return nil
+    }
+
+    private func resizeColumnNear(logicalX: CGFloat, projection: ComparisonTableProjection) -> Int? {
+        let tolerance = max(7, 8 / Self.clampedZoom(zoom))
+        for column in 0..<projection.columnCount {
+            let boundary = columnRect(column).maxX
+            if abs(boundary - logicalX) <= tolerance { return column }
+        }
+        return nil
+    }
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        guard let projection else { return }
+        let scale = Self.clampedZoom(zoom)
+        for column in 0..<projection.columnCount {
+            let rect = columnRect(column)
+            let hitRect = NSRect(x: (rect.maxX - 8 / scale) * scale, y: 0,
+                                 width: 16, height: ComparisonCanvasMetrics.headerHeight * scale)
+            addCursorRect(hitRect, cursor: .resizeLeftRight)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let projection else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let scale = Self.clampedZoom(zoom)
+        let logicalX = point.x / scale
+        let logicalY = point.y / scale
+        guard logicalY <= ComparisonCanvasMetrics.headerHeight else {
+            super.mouseDown(with: event)
+            return
+        }
+        if let column = resizeColumnNear(logicalX: logicalX, projection: projection) {
+            resizingColumn = column
+            resizeStartX = logicalX
+            resizeStartWidth = columnWidth(column)
+            window?.makeFirstResponder(self)
+            return
+        }
+        if columnAt(logicalX: logicalX, projection: projection) != nil {
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let column = resizingColumn else {
+            super.mouseDragged(with: event)
+            return
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        let logicalX = point.x / Self.clampedZoom(zoom)
+        let width = min(ComparisonCanvasMetrics.maximumColumnWidth,
+                        max(ComparisonCanvasMetrics.minimumColumnWidth,
+                            resizeStartWidth + logicalX - resizeStartX))
+        columnWidths[column] = width
+        onColumnResize?(column, width)
+        if let projection {
+            setFrameSize(NSSize(width: max(1, contentWidth(for: projection) * Self.clampedZoom(zoom)),
+                                height: frame.height))
+        }
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        resizingColumn = nil
+        super.mouseUp(with: event)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -732,9 +943,17 @@ final class ComparisonTableContentView: NSView {
             width: dirtyRect.width / scale,
             height: dirtyRect.height / scale
         )
-        let firstColumn = max(0, Int(floor((logicalRect.minX - ComparisonCanvasMetrics.rowHeaderWidth) / ComparisonCanvasMetrics.columnWidth)) - 1)
-        let lastColumn = min(projection.columnCount - 1,
-            Int(ceil((logicalRect.maxX - ComparisonCanvasMetrics.rowHeaderWidth) / ComparisonCanvasMetrics.columnWidth)) + 1)
+        var firstColumn = projection.columnCount
+        var lastColumn = -1
+        for column in 0..<projection.columnCount {
+            let rect = columnRect(column)
+            if rect.maxX >= logicalRect.minX, rect.minX <= logicalRect.maxX {
+                firstColumn = min(firstColumn, column)
+                lastColumn = max(lastColumn, column)
+            }
+        }
+        if firstColumn < projection.columnCount { firstColumn = max(0, firstColumn - 1) }
+        if lastColumn >= 0 { lastColumn = min(projection.columnCount - 1, lastColumn + 1) }
         let firstRow = max(0, Int(floor((logicalRect.minY - ComparisonCanvasMetrics.headerHeight) / ComparisonCanvasMetrics.rowHeight)) - 1)
         let lastRow = min(projection.rowCount - 1,
             Int(ceil((logicalRect.maxY - ComparisonCanvasMetrics.headerHeight) / ComparisonCanvasMetrics.rowHeight)) + 1)
@@ -755,12 +974,7 @@ final class ComparisonTableContentView: NSView {
            logicalRect.maxY >= 0,
            firstColumn <= lastColumn {
             for column in firstColumn...lastColumn {
-                let rect = NSRect(
-                    x: ComparisonCanvasMetrics.rowHeaderWidth + CGFloat(column) * ComparisonCanvasMetrics.columnWidth,
-                    y: 0,
-                    width: ComparisonCanvasMetrics.columnWidth,
-                    height: ComparisonCanvasMetrics.headerHeight
-                )
+                let rect = columnRect(column)
                 drawHeader(GridAddress.columnName(column), kind: projection.columnKind(column), in: rect)
             }
         }
@@ -800,12 +1014,7 @@ final class ComparisonTableContentView: NSView {
     private func drawCell(projection: ComparisonTableProjection, row: Int, column: Int) {
         let address = GridAddress(row: row, column: column)
         let kind = projection.kind(at: address)
-        let rect = NSRect(
-            x: ComparisonCanvasMetrics.rowHeaderWidth + CGFloat(column) * ComparisonCanvasMetrics.columnWidth,
-            y: ComparisonCanvasMetrics.headerHeight + CGFloat(row) * ComparisonCanvasMetrics.rowHeight,
-            width: ComparisonCanvasMetrics.columnWidth,
-            height: ComparisonCanvasMetrics.rowHeight
-        )
+        let rect = cellRect(row: row, column: column)
         kind.nsCellColor.setFill()
         NSBezierPath(rect: rect).fill()
 
@@ -843,7 +1052,12 @@ final class ComparisonTableContentView: NSView {
                 font: NSFont.systemFont(ofSize: 11))
         }
 
-        if projection.matches(address, query: query) {
+        if activeAddress == address {
+            NSColor.controlAccentColor.setStroke()
+            let path = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1))
+            path.lineWidth = 2.5
+            path.stroke()
+        } else if projection.matches(address, query: query) {
             NSColor.systemYellow.setStroke()
             let path = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1))
             path.lineWidth = 2
@@ -913,21 +1127,29 @@ final class ComparisonCanvasScrollView: NSScrollView {
     }
 
     func update(identity: String, projection: ComparisonTableProjection, query: String, zoom: CGFloat,
-                zoomHandler: @escaping (CGFloat) -> Void) {
+                columnWidths: [Int: CGFloat], activeAddress: GridAddress?,
+                zoomHandler: @escaping (CGFloat) -> Void,
+                columnResizeHandler: @escaping (Int, CGFloat) -> Void) {
         self.zoomHandler = zoomHandler
         let targetZoom = Self.clampedZoom(zoom)
         let identityChanged = contentIdentity != identity
         contentIdentity = identity
         let oldZoom = currentZoom
         let center = identityChanged ? NSPoint.zero : logicalViewportCenter(for: oldZoom)
+        let oldActiveAddress = canvasView.activeAddress
         currentZoom = targetZoom
-        canvasView.update(projection: projection, query: query, zoom: targetZoom)
+        canvasView.update(projection: projection, query: query, zoom: targetZoom,
+                          columnWidths: columnWidths, activeAddress: activeAddress,
+                          onColumnResize: columnResizeHandler)
         if identityChanged {
             scrollToOrigin()
         } else if abs(oldZoom - targetZoom) > 0.0001 {
             scrollToLogicalCenter(center)
         } else {
             clampScrollPosition()
+        }
+        if oldActiveAddress != activeAddress, let activeAddress {
+            scrollToAddress(activeAddress, projection: projection)
         }
     }
 
@@ -986,6 +1208,33 @@ final class ComparisonCanvasScrollView: NSScrollView {
         reflectScrolledClipView(contentView)
     }
 
+    private func scrollToAddress(_ address: GridAddress, projection: ComparisonTableProjection) {
+        guard address.row >= 0, address.row < projection.rowCount,
+              address.column >= 0, address.column < projection.columnCount else { return }
+        layoutSubtreeIfNeeded()
+        let scale = currentZoom
+        let widths = canvasView
+        var x = ComparisonCanvasMetrics.rowHeaderWidth
+        for column in 0..<address.column {
+            x += min(ComparisonCanvasMetrics.maximumColumnWidth,
+                     max(ComparisonCanvasMetrics.minimumColumnWidth,
+                         widths.columnWidthForNavigation(column)))
+        }
+        let rect = NSRect(x: x * scale,
+                          y: (ComparisonCanvasMetrics.headerHeight + CGFloat(address.row) * ComparisonCanvasMetrics.rowHeight) * scale,
+                          width: widths.columnWidthForNavigation(address.column) * scale,
+                          height: ComparisonCanvasMetrics.rowHeight * scale)
+        let bounds = contentView.bounds
+        let maximum = NSPoint(x: max(0, canvasView.frame.width - bounds.width),
+                              y: max(0, canvasView.frame.height - bounds.height))
+        let target = NSPoint(x: rect.midX - bounds.width / 2,
+                             y: rect.midY - bounds.height / 2)
+        let origin = NSPoint(x: min(max(0, target.x), maximum.x),
+                             y: min(max(0, target.y), maximum.y))
+        contentView.scroll(to: origin)
+        reflectScrolledClipView(contentView)
+    }
+
     private func clampScrollPosition() {
         let bounds = contentView.bounds
         let maximum = NSPoint(
@@ -1014,16 +1263,23 @@ struct ComparisonTableCanvas: NSViewRepresentable {
     let projection: ComparisonTableProjection
     let query: String
     let zoom: CGFloat
+    let columnWidths: [Int: CGFloat]
+    let activeAddress: GridAddress?
     let onZoom: (CGFloat) -> Void
+    let onColumnResize: (Int, CGFloat) -> Void
 
     func makeNSView(context: Context) -> ComparisonCanvasScrollView {
         let view = ComparisonCanvasScrollView(frame: .zero)
-        view.update(identity: identity, projection: projection, query: query, zoom: zoom, zoomHandler: onZoom)
+        view.update(identity: identity, projection: projection, query: query, zoom: zoom,
+                    columnWidths: columnWidths, activeAddress: activeAddress,
+                    zoomHandler: onZoom, columnResizeHandler: onColumnResize)
         return view
     }
 
     func updateNSView(_ nsView: ComparisonCanvasScrollView, context: Context) {
-        nsView.update(identity: identity, projection: projection, query: query, zoom: zoom, zoomHandler: onZoom)
+        nsView.update(identity: identity, projection: projection, query: query, zoom: zoom,
+                      columnWidths: columnWidths, activeAddress: activeAddress,
+                      zoomHandler: onZoom, columnResizeHandler: onColumnResize)
     }
 }
 
@@ -1033,16 +1289,24 @@ struct ComparisonSheetTableView: View {
     let query: String
     let sheetName: String
     let zoom: CGFloat
+    let columnWidths: [Int: CGFloat]
+    let activeAddress: GridAddress?
     let onZoom: (CGFloat) -> Void
+    let onColumnResize: (Int, CGFloat) -> Void
 
     init(identity: String, projection: ComparisonTableProjection, sheetName: String, query: String, zoom: CGFloat,
-         onZoom: @escaping (CGFloat) -> Void) {
+         columnWidths: [Int: CGFloat], activeAddress: GridAddress?,
+         onZoom: @escaping (CGFloat) -> Void,
+         onColumnResize: @escaping (Int, CGFloat) -> Void) {
         self.projection = projection
         self.identity = identity
         self.sheetName = sheetName
         self.query = query
         self.zoom = zoom
+        self.columnWidths = columnWidths
+        self.activeAddress = activeAddress
         self.onZoom = onZoom
+        self.onColumnResize = onColumnResize
     }
 
     var body: some View {
@@ -1054,7 +1318,9 @@ struct ComparisonSheetTableView: View {
                 if projection.oldSheet == nil { Text("仅当前版本").font(.caption).foregroundStyle(.green) }
                 if projection.newSheet == nil { Text("仅历史版本").font(.caption).foregroundStyle(.red) }
             }.padding(.bottom, 6)
-            ComparisonTableCanvas(identity: identity, projection: projection, query: query, zoom: zoom, onZoom: onZoom)
+            ComparisonTableCanvas(identity: identity, projection: projection, query: query, zoom: zoom,
+                                  columnWidths: columnWidths, activeAddress: activeAddress,
+                                  onZoom: onZoom, onColumnResize: onColumnResize)
                 .frame(minHeight: 360, idealHeight: 560, maxHeight: 720)
         }
     }
@@ -1074,6 +1340,12 @@ struct FolderComparisonView: View {
                 Button(model.isRunning ? "对比中…" : "开始对比") { model.run() }
                     .buttonStyle(.borderedProminent).disabled(model.isRunning || !model.canRun)
                 if model.isRunning { Button("停止") { model.stop() } }
+                if !model.isRunning && !model.files.isEmpty {
+                    Button("核对完成") { model.finishReview() }
+                        .buttonStyle(.bordered)
+                        .tint(.green)
+                        .help("结束本次对比并释放已加载的差异数据")
+                }
             }.padding(.horizontal, 16).padding(.top, 12)
             HStack(spacing: 12) {
                 if model.sourceMode == .folders {
@@ -1119,7 +1391,7 @@ struct FolderComparisonView: View {
         .onAppear { model.configureGitProject(project) }
         .onChange(of: project?.id) { _, _ in model.configureGitProject(project) }
         .onChange(of: model.sourceMode) { _, _ in model.sourceModeDidChange(project: project) }
-        .onChange(of: model.sheetFilter) { _, _ in model.page = 0 }
+        .onChange(of: model.sheetFilter) { _, _ in model.page = 0; model.activeDifferenceIndex = 0 }
         .onChange(of: model.cellQuery) { _, _ in model.page = 0 }
     }
     private func folder(old: Bool) -> some View {
@@ -1214,36 +1486,77 @@ struct FolderComparisonView: View {
                 }
                 if !file.note.isEmpty { Text(file.note).font(.caption).foregroundStyle(file.status == .failed ? .red : .secondary).textSelection(.enabled) }
                 HStack(spacing: 12) {
-                    Label("删除", systemImage: "minus.square.fill").foregroundStyle(.red)
-                    Label("新增", systemImage: "plus.square.fill").foregroundStyle(.green)
-                    Label("修改", systemImage: "square.fill").foregroundStyle(.purple)
-                    Text("内容已对齐；行列号为对齐视图位置。修改显示旧值 ↓ 新值").font(.caption).foregroundStyle(.secondary)
+                    Label("新增 \(file.addedCount)", systemImage: "plus.square.fill").foregroundStyle(.green)
+                    Label("删除 \(file.removedCount)", systemImage: "minus.square.fill").foregroundStyle(.red)
+                    Label("修改 \(file.modifiedCount)", systemImage: "square.fill").foregroundStyle(.purple)
+                    Text("共 \(file.differences.count) 处 · 修改显示旧值 ↓ 新值")
+                        .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     if let index = model.selectedIndex { Text("文件 \(index + 1)/\(model.files.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 }.font(.caption)
-                HStack {
-                    Picker("工作表", selection: $model.sheetFilter) {
-                        Text("全部工作表").tag("全部工作表")
-                        ForEach(sheetNames, id: \.self) { Text($0).tag($0) }
-                    }.frame(maxWidth: 250)
-                    TextField("在完整表格中查找值或位置", text: $model.cellQuery).textFieldStyle(.roundedBorder)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(sheetNames, id: \.self) { name in
+                            let isSelected = selectedSheet == name
+                            let hasChanges = model.sheetHasDifferences(file, name: name)
+                            Button { model.selectSheet(name) } label: {
+                                HStack(spacing: 5) {
+                                    Text(name).lineLimit(1)
+                                    if hasChanges {
+                                        Circle().fill(model.sheetDifferenceColor(file, name: name)).frame(width: 6, height: 6)
+                                    }
+                                }
+                                .font(.caption.weight(isSelected ? .semibold : .regular))
+                                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(isSelected ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1))
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonStyle(.plain)
+                            .help(hasChanges ? "此工作表有差异" : "此工作表无差异")
+                        }
+                    }
+                }
+                HStack(spacing: 8) {
+                    TextField("搜索当前工作表的值或位置", text: $model.cellQuery).textFieldStyle(.roundedBorder)
+                    if let selectedSheet, !model.cellQuery.isEmpty {
+                        let projection = model.projection(for: file, sheetName: selectedSheet)
+                        Text("匹配 \(model.matchingCellCount(for: projection)) 个")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+                    }
+                    Spacer(minLength: 4)
+                    if let position = model.activeDifferencePosition {
+                        Text("改动 \(position + 1)/\(model.selectedSheetDifferences.count)")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+                        Button { model.moveDifference(-1) } label: {
+                            Image(systemName: "chevron.up")
+                        }.help("上一个改动")
+                        Button { model.moveDifference(1) } label: {
+                            Image(systemName: "chevron.down")
+                        }.help("下一个改动")
+                    } else {
+                        Text("当前工作表无改动").font(.caption).foregroundStyle(.secondary).fixedSize()
+                    }
                 }
                 Divider()
                 if sheetNames.isEmpty {
                     ContentUnavailableView("没有可展示的工作表", systemImage: "tablecells", description: Text(file.note))
-                } else {
+                } else if let selectedSheet {
+                    let projection = model.projection(for: file, sheetName: selectedSheet)
                     ScrollView(.vertical) {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            if model.sheetFilter == "全部工作表" {
-                                ForEach(sheetNames, id: \.self) { name in
-                                    ComparisonSheetTableView(identity: "\(file.id)#\(name)", projection: model.projection(for: file, sheetName: name), sheetName: name, query: model.cellQuery,
-                                        zoom: model.comparisonZoom, onZoom: { model.setComparisonZoom($0) })
-                                }
-                            } else if let selectedSheet {
-                                ComparisonSheetTableView(identity: "\(file.id)#\(selectedSheet)", projection: model.projection(for: file, sheetName: selectedSheet), sheetName: selectedSheet, query: model.cellQuery,
-                                    zoom: model.comparisonZoom, onZoom: { model.setComparisonZoom($0) })
-                            }
-                        }
+                        ComparisonSheetTableView(
+                            identity: "\(file.id)#\(selectedSheet)",
+                            projection: projection,
+                            sheetName: selectedSheet,
+                            query: model.cellQuery,
+                            zoom: model.comparisonZoom,
+                            columnWidths: model.comparisonWidths(for: file, sheetName: selectedSheet),
+                            activeAddress: model.activeDifference?.primaryAddress,
+                            onZoom: { model.setComparisonZoom($0) },
+                            onColumnResize: { column, width in
+                                model.setComparisonColumnWidth(width, column: column, file: file, sheetName: selectedSheet)
+                            })
                         .padding(14)
                     }
                 }
