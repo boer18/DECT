@@ -1,5 +1,7 @@
 # 表格工具
 
+1.8.4：新增 macOS 原生帮助手册。系统顶部“帮助”菜单可以打开独立的帮助窗口，支持按主题浏览和搜索；系统“表格工具”菜单新增 Project 目录、重新扫描、翻译 API、版本更新等入口；系统“设置表格工具…”场景可以直接管理翻译 API，不需要先进入多语言页签。新增 `HELP.md` 作为可独立阅读的完整手册。
+
 1.8.3：项目识别改为通用的 Luban 配置入口发现。递归扫描时不再要求配置目录必须叫 `Config`，会识别任意包含 `gen.sh` 和同目录 `luban.conf` 的工程，并按 `luban.conf` 中的 `dataDir` 读取表格。新增配置根目录、数据根目录和仓库根目录的独立记录，兼容 TCR 的 `trunk/LubanConfig/Datas` 结构；配置表目录、`TbLanguage` 和 Git 历史对比全部使用实际数据根目录，旧工程缓存也可以继续恢复。
 
 1.8.2：新增配置表内搜索。可在当前工作表中即时搜索单元格内容、公式和计算结果，显示命中数量，使用上下按钮循环定位，并对所有命中单元格高亮；大表搜索采用异步扫描，不阻塞编辑和滚动。
@@ -254,10 +256,12 @@ Project 根目录
 | `Sources/ProjectConfiguration.swift` | 通用配置工程识别；解析 `gen.sh` 同目录的 `luban.conf.dataDir`，定位配置根目录、数据根目录、主 `TbLanguage.xlsx` 和最近 Git 仓库根目录。 |
 | `Sources/TranslationDraftStore.swift` | 多语言草稿本地存储；按工作簿保存和恢复翻译草稿，使应用重启后可以继续工作。 |
 | `Sources/WorkspaceSmokeTests.swift` | 工作区回归测试；覆盖工作簿读写、特殊字符、外部修改保护、撤销、草稿恢复、递归对比、Git 历史快照、ID 对齐、公式变化、填充柄和取消操作等。 |
+| `Sources/AppHelp.swift` | 应用内帮助手册内容、主题导航、帮助搜索和独立帮助窗口。 |
 | `Tools/render-icon.swift` | 用于构建时生成应用图标 PNG 和 ICNS 资源。 |
 | `Tools/inspect-language-workbooks.mjs` | 辅助检查多语言工作簿结构。 |
 | `build-app.sh` | 面向 Apple Silicon 编译应用、生成图标资源、复制 `Info.plist`、打包并进行本地签名。 |
 | `Info.plist` | 应用名称、Bundle ID、版本号、最低系统版本和图标等应用元数据。 |
+| `HELP.md` | 可在仓库中独立阅读的完整帮助手册，与应用内帮助内容保持一致。 |
 
 ### 运行时边界
 
@@ -312,8 +316,8 @@ Project 根目录
 | 项目 | 值 |
 | --- | --- |
 | 应用名称 | 表格工具 |
-| 版本 | 1.8.3 |
-| Build | 20260910.3 |
+| 版本 | 1.8.4 |
+| Build | 20260910.4 |
 | Bundle ID | `io.centurygames.one-click-table-export` |
 | 最低 macOS | 14.0 |
 | 目标架构 | Apple Silicon / `arm64` |
@@ -386,4 +390,4 @@ dist/表格工具.app
 
 ## 当前版本说明
 
-本文档对应 `表格工具 1.8.3`（Build `20260910.3`）。README 以当前源码和应用元数据为准；如果工程脚本、表格格式或翻译服务接口发生变化，应同步更新对应模块和本文档。
+本文档对应 `表格工具 1.8.4`（Build `20260910.4`）。README 以当前源码和应用元数据为准；如果工程脚本、表格格式或翻译服务接口发生变化，应同步更新对应模块和本文档。

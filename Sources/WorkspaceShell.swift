@@ -2,6 +2,19 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum WorkspaceMenuAction: Equatable {
+    case chooseScanRoot
+    case rescanProjects
+    case translationSettings
+    case updateNotes
+    case checkForUpdates
+}
+
+@MainActor
+final class WorkspaceMenuRouter: ObservableObject {
+    @Published var pendingAction: WorkspaceMenuAction?
+}
+
 @MainActor
 final class TableWorkspaceModel: ObservableObject {
     @Published var openIDs: [String] = []
@@ -359,6 +372,7 @@ final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {
 }
 
 struct WorkspaceRootView: View {
+    @EnvironmentObject private var menuRouter: WorkspaceMenuRouter
     @StateObject private var updater = AppUpdater()
     @StateObject private var exporter = ExportViewModel()
     @StateObject private var language = LanguageBrowserViewModel()
@@ -440,11 +454,31 @@ struct WorkspaceRootView: View {
         .sheet(isPresented: $language.showsTranslationSettings) {
             TranslationSettingsView(onSaved: { })
         }
+        .onChange(of: menuRouter.pendingAction) { _, action in
+            handleMenuAction(action)
+        }
         .task {
             exporter.start()
             updater.mayRestart = { !workspace.hasPendingChanges && !workspace.isBusy && !exporter.isExporting && !language.isBusy && language.pendingChangeCount == 0 && !comparison.isRunning }
             updater.start()
             WorkspaceApplicationDelegate.hasUnsavedWork = { workspace.hasPendingChanges || workspace.isBusy || exporter.isExporting || language.isBusy || language.pendingChangeCount > 0 || comparison.isRunning || updater.busy }
+        }
+    }
+    private func handleMenuAction(_ action: WorkspaceMenuAction?) {
+        guard let action else { return }
+        menuRouter.pendingAction = nil
+        switch action {
+        case .chooseScanRoot:
+            exporter.chooseScanRoot()
+        case .rescanProjects:
+            exporter.scan()
+        case .translationSettings:
+            language.showsTranslationSettings = true
+        case .updateNotes:
+            updater.showsPanel = true
+            Task { await updater.check() }
+        case .checkForUpdates:
+            Task { await updater.check() }
         }
     }
     private func exportCurrent() {

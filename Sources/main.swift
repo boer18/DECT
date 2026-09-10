@@ -2896,10 +2896,51 @@ struct ContentView: View {
 @main
 struct OneClickTableExportApp: App {
     @NSApplicationDelegateAdaptor(WorkspaceApplicationDelegate.self) var appDelegate
+    @StateObject private var menuRouter = WorkspaceMenuRouter()
+    @Environment(\.openWindow) private var openWindow
+
     var body: some Scene {
-        Window("表格工具", id: "workspace") { ContentView() }
+        Window("表格工具", id: "workspace") {
+            ContentView()
+                .environmentObject(menuRouter)
+        }
             .windowResizability(.contentMinSize)
             .defaultSize(width: 1400, height: 860)
+            .commands {
+                CommandMenu("表格工具") {
+                    Button("选择 Project 目录…") {
+                        menuRouter.pendingAction = .chooseScanRoot
+                    }
+                    Button("重新扫描工程") {
+                        menuRouter.pendingAction = .rescanProjects
+                    }
+                    Divider()
+                    Button("翻译 API 设置…") {
+                        menuRouter.pendingAction = .translationSettings
+                    }
+                    Divider()
+                    Button("版本与更新说明…") {
+                        menuRouter.pendingAction = .updateNotes
+                    }
+                    Button("检查更新…") {
+                        menuRouter.pendingAction = .checkForUpdates
+                    }
+                }
+                CommandGroup(after: .help) {
+                    Button("表格工具帮助") {
+                        openWindow(id: "help")
+                    }
+                    .keyboardShortcut("?", modifiers: [.command, .shift])
+                }
+            }
+        Window("表格工具帮助", id: "help") {
+            AppHelpView()
+        }
+            .windowResizability(.contentMinSize)
+            .defaultSize(width: 980, height: 680)
+        Settings {
+            TranslationSettingsView(onSaved: { })
+        }
     }
 }
 #else
