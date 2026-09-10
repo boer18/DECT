@@ -238,17 +238,108 @@ struct TableWorkspaceView: View {
 
 // Route the main window's close button through the normal quit confirmation
 // before closing anything, so cancelling keeps the workspace visible.
+// SwiftUI may replace the window delegate and the standard close action after
+// the view is attached, so both routes are repaired whenever the window comes
+// back to the front and once more on the next run-loop turns.
+final class WorkspaceCloseDelegateProxy: NSObject, NSWindowDelegate {
+    weak var original: NSWindowDelegate?
+    private let requestTermination: () -> Void
+    private var isRequestingTermination = false
+
+    init(original: NSWindowDelegate?, requestTermination: @escaping () -> Void) {
+        self.original = original
+        self.requestTermination = requestTermination
+        super.init()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isRequestingTermination else { return true }
+        isRequestingTermination = true
+        requestTermination()
+        DispatchQueue.main.async { [weak self] in self?.isRequestingTermination = false }
+        // NSApplication.terminate(_:) decides whether the application may
+        // quit. The window must remain open if that decision is cancelled.
+        return false
+    }
+
+    override func responds(to selector: Selector) -> Bool {
+        if selector == #selector(NSWindowDelegate.windowShouldClose(_:)) { return true }
+        return original?.responds(to: selector) == true || super.responds(to: selector)
+    }
+
+    override func forwardingTarget(for selector: Selector) -> Any? {
+        if let original, original.responds(to: selector) { return original }
+        return super.forwardingTarget(for: selector)
+    }
+}
+
 struct WorkspaceCloseBehavior: NSViewRepresentable {
     final class View: NSView {
+        private let onTerminate: () -> Void
+        private var closeObserver: NSObjectProtocol?
+        private var delegateProxy: WorkspaceCloseDelegateProxy?
+
+        init(onTerminate: @escaping () -> Void = { NSApplication.shared.terminate(nil) }) {
+            self.onTerminate = onTerminate
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        deinit {
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            guard let button = window?.standardWindowButton(.closeButton) else { return }
-            button.target = NSApplication.shared
-            button.action = #selector(NSApplication.terminate(_:))
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+            closeObserver = nil
+            guard let window else { return }
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.installCloseRoute()
+            }
+            installCloseRoute()
+            // The standard buttons can be created after the representable is
+            // attached. Retry after SwiftUI/AppKit finish that window pass.
+            DispatchQueue.main.async { [weak self] in self?.installCloseRoute() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.installCloseRoute()
+            }
+        }
+
+        func installCloseRoute() {
+            guard let window else { return }
+            if let button = window.standardWindowButton(.closeButton) {
+                button.target = NSApplication.shared
+                button.action = #selector(NSApplication.terminate(_:))
+            }
+            if let current = window.delegate as? WorkspaceCloseDelegateProxy {
+                delegateProxy = current
+            } else {
+                let proxy = WorkspaceCloseDelegateProxy(
+                    original: window.delegate,
+                    requestTermination: onTerminate
+                )
+                delegateProxy = proxy
+                window.delegate = proxy
+            }
+        }
+
+        // Used by the smoke test to exercise the default NSWindow close path
+        // without terminating the test process.
+        @discardableResult
+        func simulateWindowShouldCloseForTesting() -> Bool {
+            installCloseRoute()
+            return delegateProxy?.windowShouldClose(window!) ?? true
         }
     }
+
     func makeNSView(context: Context) -> View { View() }
-    func updateNSView(_ nsView: View, context: Context) { }
+    func updateNSView(_ nsView: View, context: Context) { nsView.installCloseRoute() }
 }
 
 final class WorkspaceApplicationDelegate: NSObject, NSApplicationDelegate {

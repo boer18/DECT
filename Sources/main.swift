@@ -2866,9 +2866,14 @@ struct LanguageReaderSmokeTest {
             let delegate = WorkspaceApplicationDelegate()
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.contentView = WorkspaceCloseBehavior.View()
+            var terminationRequests = 0
+            let closeView = WorkspaceCloseBehavior.View { terminationRequests += 1 }
+            window.contentView = closeView
+            window.makeKeyAndOrderFront(nil)
+            closeView.installCloseRoute()
             let button = window.standardWindowButton(.closeButton)!
             precondition(button.target === app && button.action == #selector(NSApplication.terminate(_:)))
+            precondition(closeView.simulateWindowShouldCloseForTesting() == false && terminationRequests == 1)
             precondition(delegate.applicationShouldTerminateAfterLastWindowClosed(app))
             WorkspaceApplicationDelegate.hasUnsavedWork = { false }
             precondition(delegate.applicationShouldTerminate(app) == .terminateNow)
