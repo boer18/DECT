@@ -1,5 +1,7 @@
 # 表格工具
 
+1.8.11：支持 tapcoloroasis 及同类旧版 Luban 工程导表。工具会读取工程自带的 `Luban.runtimeconfig.json`；检测到 net7.0 等旧版 Luban 时，只为本次导表进程启用 `DOTNET_ROLL_FORWARD=Major`，在已有较新 .NET Runtime 的 Mac 上兼容执行，不修改工程脚本、不改变导出目录。新增 tapcoloroasis 的全盘扫描、关键源表和旧工程运行时隔离回归测试。
+
 1.8.10：配置表右键菜单新增删除行和删除列。可在菜单内直接填写数量（默认 1），删除后的数据、临时编辑和公式引用会按实际结构移动或清理，支持撤销、重做、保存和 ZIP 完整性校验。
 
 1.8.9：优化表格操作与版本对比。右键行号或列字母后，菜单内直接输入数量并插入，不再弹出二级窗口；触控板滚动恢复原倍率，普通鼠标滚轮滚动进一步加快。对比工作区新增当前表格搜索与匹配数量、可拖动列宽、上一个/下一个改动定位、单表新增/删除/修改统计、多 Sheet 页签和改动标记；新增“核对完成”用于释放对比数据。列宽调整和定位会保持当前表格视图。
@@ -60,7 +62,7 @@
 
 | 模块 | 能力 | 主要用途 |
 | --- | --- | --- |
-| 项目工作区 | `Project` 根目录递归扫描、Luban 入口识别、项目 Tab、路径记忆、项目缓存 | 在多个工程间快速切换 |
+| 项目工作区 | `Project` 根目录递归扫描、Luban 入口识别、运行时兼容、项目 Tab、路径记忆、项目缓存 | 在多个工程间快速切换 |
 | 配置表工作区 | 表名/路径与单元格搜索、收藏、预览、编辑、保存、撤销/重做 | 在一个界面查看和修改配置表 |
 | 多表工作区 | 多表并排、多个标签、同名表并存、表间复制粘贴 | 对照不同项目或不同版本的表格 |
 | 多语言工具 | `TbLanguage` 读取、缺失翻译、批量翻译、一致性检查、保存并导表 | 集中处理多项目语言表 |
@@ -87,6 +89,16 @@ TCR 这类工程可以是：
 <仓库>/trunk/LubanConfig/gen.sh
 <仓库>/trunk/LubanConfig/luban.conf
 <仓库>/trunk/LubanConfig/Datas/
+```
+
+tapcoloroasis 这类工程可以是：
+
+```text
+<项目目录>/Config/gen.sh
+<项目目录>/Config/luban.conf
+<项目目录>/Config/Luban/Luban.runtimeconfig.json
+<项目目录>/Config/Datas/
+<项目目录>/ColorOasis/Assets/BundleRes/Config/game/
 ```
 
 工具会把仓库根目录作为项目身份，把 `LubanConfig` 作为配置根目录，把 `dataDir` 解析出的目录作为配置表数据根目录；不会根据项目名称写死路径。
@@ -158,6 +170,10 @@ TCR 这类工程可以是：
 ```text
 <配置根目录>/gen.sh
 ```
+
+工具会保留工程自己的脚本和相对路径约定。对于 tapcoloroasis 这种自带 net7.0 Luban、而本机只有较新 .NET Runtime 的工程，工具会读取同目录下的 `Luban.runtimeconfig.json`，仅在子进程环境中设置 `DOTNET_ROLL_FORWARD=Major`。如果精确的旧 Runtime 已安装，.NET 仍会优先使用它；如果没有，则尝试使用兼容的更高主版本。其他已经使用 net8.0 或更新版本的工程不会设置这个覆盖项。
+
+tapcoloroasis 的 `gen.sh` 会连续生成两类产物：调试 JSON 写入 `ColorOasis/Assets/TempConfigJson`，二进制配置和 C# 代码分别写入 `ColorOasis/Assets/BundleRes/Config/game` 与 `ColorOasis/Assets/Scripts/Game/Main/GameConfig`。工具不会改写这些目录，也不会把产物误当作源表；源表仍按 `Config/luban.conf` 的 `dataDir=Datas` 从 `Config/Datas` 读取。
 
 导表窗口会实时显示：
 
@@ -274,7 +290,7 @@ Project 根目录
 | `Sources/WorksheetWorkspace.swift` | 表格编辑引擎；负责单元格地址转换、XLSX 读写、ZIP/XML 处理、编辑、撤销/重做、行列选择、复制粘贴、冻结行列、外部变更检测、自动刷新和冲突保护。 |
 | `Sources/FolderComparison.swift` | 文件夹和 Git 历史比较引擎及显示层；负责递归扫描、表格匹配、工作表/单元格/公式差异、ID/key 对齐、检查进度、报告导出，以及虚拟化对比表格、差异颜色和缩放。 |
 | `Sources/GitHistory.swift` | Git 仓库识别、分支和实际配置表数据目录的提交读取、历史提交时间定位、`git archive` 临时快照及清理；不执行 checkout、pull 或 reset。 |
-| `Sources/ProjectConfiguration.swift` | 通用配置工程识别；解析 `gen.sh` 同目录的 `luban.conf.dataDir`，定位配置根目录、数据根目录、主 `TbLanguage.xlsx` 和最近 Git 仓库根目录。 |
+| `Sources/ProjectConfiguration.swift` | 通用配置工程识别；解析 `gen.sh` 同目录的 `luban.conf.dataDir` 和 Luban runtimeconfig，定位配置根目录、数据根目录、主 `TbLanguage.xlsx` 和最近 Git 仓库根目录。 |
 | `Sources/TranslationDraftStore.swift` | 多语言草稿本地存储；按工作簿保存和恢复翻译草稿，使应用重启后可以继续工作。 |
 | `Sources/WorkspaceSmokeTests.swift` | 工作区回归测试；覆盖工作簿读写、特殊字符、外部修改保护、撤销、草稿恢复、递归对比、Git 历史快照、ID 对齐、公式变化、填充柄和取消操作等。 |
 | `Sources/AppHelp.swift` | 应用内帮助手册内容、主题导航、帮助搜索和独立帮助窗口。 |
@@ -289,7 +305,7 @@ Project 根目录
 - 工具是原生 macOS 应用，目标架构为 Apple Silicon `arm64`。
 - 工具直接读取本地工程和表格文件，不把源表上传到工具自身的服务器。
 - 翻译和一致性检查只有在用户主动执行并配置 API 后才会调用外部服务；API Key 与其他翻译设置一起保存在本工具自己的本机应用设置中。
-- 导表的实际规则仍由各项目自己的配置目录 `gen.sh` 决定；工具根据同目录 `luban.conf` 和 `dataDir` 识别工程，负责调度和展示日志。
+- 导表的实际规则仍由各项目自己的配置目录 `gen.sh` 决定；工具根据同目录 `luban.conf` 和 `dataDir` 识别工程，负责调度和展示日志。若能识别到旧版 Luban runtimeconfig，只会为导表子进程增加兼容性的 .NET 环境变量，不修改工程文件。
 - Git 提醒、自动检查和拉取功能已经移除；表格对比中的 Git 历史模式只读本地仓库，不提供 Git 操作入口，也不会修改工程状态。
 - 表格对比只读，不写入比较源目录。
 - 保存和翻译写回源表前不会自动生成备份。
@@ -392,6 +408,10 @@ dist/表格工具.app
 ### 导表失败并显示 `dotnet`、Luban 或文件不存在
 
 工具已经把配置目录中 `gen.sh` 的原始输出和退出代码显示在日志中。此类错误通常来自项目自身的脚本依赖、相对路径、执行权限或本机运行环境，需要按日志中的具体路径处理；不需要打开 Unity 来重现导表流程。
+
+### 项目能扫描到，但 tapcoloroasis 导表失败
+
+tapcoloroasis 的 Luban runtimeconfig 目前请求 net7.0。1.8.11 及更新版本会自动为这类旧版 Luban 子进程启用 `DOTNET_ROLL_FORWARD=Major`，优先使用本机已安装的精确 Runtime，否则尝试兼容的更高主版本。日志中会显示检测到的 Luban Runtime 和兼容模式；工程脚本仍然使用 `Config/gen.sh`，产物目录也保持工程原配置。如果本机没有任何可用的 .NET Runtime，仍需安装 .NET，或根据日志修复工程环境。
 
 ### 两个项目有同名表，如何同时查看
 

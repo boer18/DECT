@@ -13,6 +13,21 @@ struct LubanProjectLayout: Hashable {
     let lubanConfigURL: URL
 }
 
+/// The runtime requested by a project's bundled Luban executable.
+///
+/// Some repositories carry an older Luban build than the .NET runtime currently
+/// installed on the Mac. Keeping this information beside the project resolver
+/// lets the exporter adapt the child process without rewriting the repository's
+/// shell scripts.
+struct LubanRuntimeInfo: Hashable {
+    let configURL: URL
+    let frameworkName: String
+    let requestedVersion: String
+    let requestedMajorVersion: Int
+
+    var description: String { "\(frameworkName) \(requestedVersion)" }
+}
+
 enum ProjectConfigurationResolver {
     static func layout(for generatorURL: URL) -> LubanProjectLayout? {
         let generator = generatorURL.standardizedFileURL
@@ -40,6 +55,47 @@ enum ProjectConfigurationResolver {
             generatorURL: generator,
             lubanConfigURL: lubanConfig
         )
+    }
+
+    /// Reads the runtime requested by the Luban executable used by a generator.
+    ///
+    /// The common locations are checked first, followed by a bounded recursive
+    /// lookup. The latter covers layouts such as TCR's `Luban/Tool` without
+    /// assuming that every repository stores the executable in the same folder.
+    static func lubanRuntimeInfo(for generatorURL: URL) -> LubanRuntimeInfo? {
+        let manager = FileManager.default
+        for runtimeURL in runtimeConfigCandidates(for: generatorURL) {
+            guard manager.isReadableFile(atPath: runtimeURL.path),
+                  let data = try? Data(contentsOf: runtimeURL),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let runtimeOptions = object["runtimeOptions"] as? [String: Any],
+                  let framework = runtimeFramework(from: runtimeOptions),
+                  let name = framework["name"] as? String,
+                  let version = framework["version"] as? String,
+                  let major = Int(version.split(separator: ".", maxSplits: 1).first ?? "")
+            else { continue }
+            return LubanRuntimeInfo(
+                configURL: runtimeURL.standardizedFileURL,
+                frameworkName: name,
+                requestedVersion: version,
+                requestedMajorVersion: major
+            )
+        }
+        return nil
+    }
+
+    /// Returns process-only overrides for older Luban builds.
+    ///
+    /// .NET uses the exact requested major version when it is installed. When
+    /// it is absent, `Major` permits a compatible newer runtime (for example a
+    /// net7.0 Luban on a Mac with only net8.0 installed). Projects already
+    /// targeting net8.0 or newer receive no override, preserving their existing
+    /// execution behavior.
+    static func dotnetEnvironmentOverrides(for generatorURL: URL) -> [String: String] {
+        guard let runtime = lubanRuntimeInfo(for: generatorURL), runtime.requestedMajorVersion < 8 else {
+            return [:]
+        }
+        return ["DOTNET_ROLL_FORWARD": "Major"]
     }
 
     /// Finds the main `TbLanguage.xlsx` without mistaking framework/story
@@ -106,5 +162,39 @@ enum ProjectConfigurationResolver {
         else { return nil }
         let value = String(source[range]).trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    private static func runtimeConfigCandidates(for generatorURL: URL) -> [URL] {
+        let configurationRoot = generatorURL.standardizedFileURL.deletingLastPathComponent()
+        var candidates = [
+            configurationRoot.appendingPathComponent("Luban/Luban.runtimeconfig.json", isDirectory: false),
+            configurationRoot.appendingPathComponent("Luban/Tool/Luban.runtimeconfig.json", isDirectory: false)
+        ]
+
+        if let enumerator = FileManager.default.enumerator(
+            at: configurationRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            for case let itemURL as URL in enumerator {
+                guard itemURL.lastPathComponent.caseInsensitiveCompare("Luban.runtimeconfig.json") == .orderedSame,
+                      (try? itemURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                else { continue }
+                candidates.append(itemURL.standardizedFileURL)
+            }
+        }
+
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    private static func runtimeFramework(from runtimeOptions: [String: Any]) -> [String: Any]? {
+        if let framework = runtimeOptions["framework"] as? [String: Any] {
+            return framework
+        }
+        if let frameworks = runtimeOptions["frameworks"] as? [[String: Any]] {
+            return frameworks.first
+        }
+        return nil
     }
 }

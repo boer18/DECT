@@ -2,6 +2,8 @@
 
 这是一份面向策划和配置表使用者的快速手册。应用内可以从 macOS 顶部菜单栏的“帮助”打开同样的内容。
 
+当前版本 1.8.11 支持 tapcoloroasis 及同类旧版 Luban 工程；导表时会自动识别项目的 .NET Runtime 要求并进行进程级兼容处理。
+
 ## 1. 开始使用
 
 第一次打开工具时，点击顶部“选择 Project 目录”，选择包含一个或多个工程的目录。工具会递归寻找包含以下文件的配置入口：
@@ -27,6 +29,16 @@ TCR 这类工程可以是：
 <仓库>/trunk/LubanConfig/gen.sh
 <仓库>/trunk/LubanConfig/luban.conf
 <仓库>/trunk/LubanConfig/Datas/
+```
+
+tapcoloroasis 这类工程可以是：
+
+```text
+<项目目录>/Config/gen.sh
+<项目目录>/Config/luban.conf
+<项目目录>/Config/Luban/Luban.runtimeconfig.json
+<项目目录>/Config/Datas/
+<项目目录>/ColorOasis/Assets/BundleRes/Config/game/
 ```
 
 工具会把最近的 `.git` 根目录作为项目身份，把 `gen.sh` 所在目录作为配置根目录，把 `dataDir` 解析出的目录作为配置表数据根目录。因此配置目录不必固定命名为 `Config`。
@@ -138,6 +150,10 @@ Git 历史模式会跟随顶部当前项目读取本地 `.git`、分支和配置
 ## 7. 一键导表
 
 选择项目后点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存，再运行对应配置目录中的 `gen.sh`。
+
+对于 tapcoloroasis 这类 `Luban.runtimeconfig.json` 请求 net7.0 的项目，工具会读取该文件，并仅为本次导表进程设置 `DOTNET_ROLL_FORWARD=Major`，使其可以在已安装 .NET 8 或更新版本的 Mac 上运行。已经使用 net8.0 或更新版本的旧项目不会设置这个覆盖项；工程脚本、源表目录和导出目录都不会被工具改写。
+
+tapcoloroasis 的 `gen.sh` 会按工程原规则生成 JSON、`.bytes` 和 C# 代码：源表来自 `Config/Datas`，产物分别位于 `ColorOasis/Assets/TempConfigJson`、`ColorOasis/Assets/BundleRes/Config/game` 和 `ColorOasis/Assets/Scripts/Game/Main/GameConfig`。
 
 日志会显示：
 

@@ -145,10 +145,11 @@ enum AppHelpContent {
                 AppHelpBlock("开始导表", text: "选择顶部项目 Tab 后，点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存对应内容，再运行配置目录中的 gen.sh。"),
                 AppHelpBlock("日志内容", bullets: [
                     "工程目录、配置目录、数据目录、脚本路径和执行目录。",
+                    "检测到的 Luban Runtime；对于 net7.0 等旧版 Luban，必要时会显示本次导表启用的 .NET 兼容模式。",
                     "脚本标准输出和错误输出，包括 dotnet、Luban、权限和文件不存在等具体错误。",
                     "成功、停止或失败状态，以及失败时的退出代码。"
                 ]),
-                AppHelpBlock("常见失败", text: "如果日志提示 dotnet、Luban.dll 或 .NET Runtime 不存在，这是工程脚本或本机环境问题。请按照日志中的实际路径修复；工具不会自动修改工程生成文件，也不会启动 Unity。")
+                AppHelpBlock("常见失败", text: "tapcoloroasis 等旧版 Luban 工程会自动尝试使用兼容的较新 .NET Runtime；如果本机没有任何可用 Runtime，仍会把原始错误显示在日志中。工具不会自动修改工程生成文件，也不会启动 Unity。")
             ]
         ),
         AppHelpTopic(

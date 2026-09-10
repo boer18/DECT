@@ -140,6 +140,32 @@ enum WorkspaceSmokeTests {
             try require(legacy.configurationRootURL.lastPathComponent == "Config" &&
                         legacy.dataRootURL.path.hasSuffix("/Config/Datas"),
                         "传统 Config/Datas 工程兼容识别错误")
+            try require(ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: legacy.generatorURL).isEmpty,
+                        "传统 net8 Luban 工程被错误套用旧运行时兼容模式")
+        }
+        var tapcolorSourceTableCount: Int?
+        if let tapcolor = projects.first(where: { $0.rootURL.lastPathComponent == "tapcoloroasis" }) {
+            try require(tapcolor.configurationRootURL.lastPathComponent == "Config" &&
+                        tapcolor.dataRootURL.path.hasSuffix("/tapcoloroasis/Config/Datas"),
+                        "tapcoloroasis Config/Datas 工程兼容识别错误")
+            try require(tapcolor.generatorURL.lastPathComponent == "gen.sh" &&
+                        tapcolor.workingDirectoryURL == tapcolor.configurationRootURL,
+                        "tapcoloroasis 导表脚本或执行目录识别错误")
+            guard let runtime = ProjectConfigurationResolver.lubanRuntimeInfo(for: tapcolor.generatorURL) else {
+                throw WorkspaceError(message: "tapcoloroasis Luban runtimeconfig 未识别。")
+            }
+            try require(runtime.requestedMajorVersion == 7 &&
+                        runtime.requestedVersion.hasPrefix("7.") &&
+                        ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: tapcolor.generatorURL)["DOTNET_ROLL_FORWARD"] == "Major",
+                        "tapcoloroasis net7 Luban 兼容模式识别错误")
+            let tables = try ProjectTableScanner.scan(projects: [tapcolor])
+            try require(tables.count >= 70 &&
+                        tables.contains(where: { $0.relativeDataPath == "TbLanguage.xlsx" }) &&
+                        tables.contains(where: { $0.relativeDataPath == "__tables__.xlsx" }) &&
+                        tables.contains(where: { $0.relativeDataPath == "__beans__.xlsx" }) &&
+                        tables.contains(where: { $0.relativeDataPath == "__enums__.xlsx" }),
+                        "tapcoloroasis 配置表递归扫描数量或主语言表异常：\(tables.count)")
+            tapcolorSourceTableCount = tables.count
         }
         guard let project = projects.first(where: { $0.rootURL.lastPathComponent == "TCR" }) else {
             throw WorkspaceError(message: "项目扫描未找到 TCR 配置工程。")
@@ -152,6 +178,8 @@ enum WorkspaceSmokeTests {
         try require(project.generatorURL.lastPathComponent == "gen.sh" &&
                     project.workingDirectoryURL == project.configurationRootURL,
                     "TCR 导表脚本或执行目录识别错误")
+        try require(ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: project.generatorURL).isEmpty,
+                    "TCR net8 Luban 工程被错误套用旧运行时兼容模式")
 
         let tables = try ProjectTableScanner.scan(projects: [project])
         try require(tables.count >= 80, "TCR 配置表递归扫描数量异常：\(tables.count)")
@@ -176,7 +204,10 @@ enum WorkspaceSmokeTests {
         try require(repository.dataRelativePath == "trunk/LubanConfig/Datas" &&
                     repository.currentDataRoot == project.dataRootURL,
                     "TCR Git 历史配置表路径识别错误：\(repository.dataRelativePath)")
-        print("TCR 通用工程扫描：配置根目录、dataDir、80 张表、V2/V3/中文子目录、主语言表和 Git 数据路径通过；源表未改。")
+        let tapcolorStatus = tapcolorSourceTableCount.map {
+            "；tapcoloroasis Config/Datas、\($0) 张源表、net7 Luban 兼容识别通过"
+        } ?? ""
+        print("TCR 通用工程扫描：配置根目录、dataDir、80 张表、V2/V3/中文子目录、主语言表和 Git 数据路径通过\(tapcolorStatus)；源表未改。")
     }
 
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

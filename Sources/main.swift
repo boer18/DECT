@@ -2293,6 +2293,10 @@ final class ExportViewModel: ObservableObject {
         appendLog("脚本：\(project.generatorURL.path)\n\n")
         appendLog("执行目录：\(project.workingDirectoryURL.path)\n\n")
 
+        if let runtime = ProjectConfigurationResolver.lubanRuntimeInfo(for: project.generatorURL) {
+            appendLog("Luban 运行时：\(runtime.description)\n")
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [project.generatorURL.path]
@@ -2300,6 +2304,15 @@ final class ExportViewModel: ObservableObject {
         // preserves relative paths for both Config and nested layouts such as
         // TCR/trunk/LubanConfig.
         process.currentDirectoryURL = project.workingDirectoryURL
+        var environment = ProcessInfo.processInfo.environment
+        let environmentOverrides = ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: project.generatorURL)
+        if !environmentOverrides.isEmpty {
+            for (key, value) in environmentOverrides {
+                environment[key] = value
+            }
+            appendLog("运行时兼容：检测到旧版 Luban，已仅为本次导表启用 DOTNET_ROLL_FORWARD=Major；工程脚本未修改。\n\n")
+        }
+        process.environment = environment
 
         let standardOutput = Pipe()
         let standardError = Pipe()
