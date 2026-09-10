@@ -308,6 +308,43 @@ enum WorkspaceSmokeTests {
                 try require(expected == actual, "非目标工作簿部件变化：\(member)")
             }
             _ = try GridWorkbookIO.capture("/usr/bin/unzip", ["-tq", file.path])
+
+            // Structural editing: insert rows and columns, keep source cells
+            // addressable through the visible coordinate map, and persist the
+            // inserted blank cell together with the shifted original data.
+            let insertFile = project.appendingPathComponent("Insert.xlsx")
+            try manager.copyItem(at: original, to: insertFile)
+            let insertSnapshot = try GridWorkbookIO.read(insertFile)
+            guard let insertAnchor = insertSnapshot.cells.keys
+                .sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) })
+                .first(where: { insertSnapshot.cells[$0]?.formula == false && !(insertSnapshot.cells[$0]?.text.isEmpty ?? true) }),
+                  let insertAnchorCell = insertSnapshot.cells[insertAnchor] else {
+                throw WorkspaceError(message: "结构插入测试找不到普通单元格。")
+            }
+            let insertEditor = GridEditorModel(); insertEditor.snapshot = insertSnapshot
+            insertEditor.insert(axis: .rows, at: 0, count: 2)
+            insertEditor.insert(axis: .columns, at: 0, count: 1)
+            let shiftedAnchor = GridWorkbookIO.addressAfterInsertions(insertAnchor, insertions: insertEditor.insertions)
+            try require(insertEditor.sourceText(shiftedAnchor) == insertAnchorCell.text &&
+                        insertEditor.hasPendingChanges, "插入后原单元格坐标映射失败")
+            let insertedAddress = GridAddress(row: 0, column: 0)
+            insertEditor.edit([insertedAddress: "inserted structural value"])
+            insertEditor.undo()
+            try require(insertEditor.inputText(insertedAddress).isEmpty && insertEditor.insertions.count == 2,
+                        "结构插入后的单元格撤销失败")
+            insertEditor.redo()
+            try require(insertEditor.inputText(insertedAddress) == "inserted structural value",
+                        "结构插入后的单元格重做失败")
+            let insertedSnapshot = try GridWorkbookIO.save(insertSnapshot,
+                changes: insertEditor.changes,
+                formulaAddresses: insertEditor.formulaAddresses,
+                insertions: insertEditor.insertions)
+            try require(insertedSnapshot.cells[insertedAddress]?.text == "inserted structural value" &&
+                        insertedSnapshot.cells[shiftedAnchor]?.text == insertAnchorCell.text,
+                        "行列插入写回或原单元格移动失败")
+            _ = try GridWorkbookIO.capture("/usr/bin/unzip", ["-tq", insertFile.path])
+            print("行列插入：显示坐标映射、编辑、保存、撤销、重做与 ZIP 校验通过")
+
             // Formula editing: the editor exposes the raw formula with a
             // leading '=', and the writer stores the formula body in <f>.
             let formulaFile = project.appendingPathComponent("Formula.xlsx")
@@ -568,6 +605,25 @@ enum WorkspaceSmokeTests {
             try require(abs(frozenScrollAfterFill.x - frozenScrollOrigin.x) < 1 &&
                         abs(frozenScrollAfterFill.y - frozenScrollOrigin.y) < 1,
                         "冻结多区域填充后滚动位置跳回顶部")
+            let bottomRow = max(5, editor.rowCount - 2)
+            editor.select(row: bottomRow, column: 0, extending: false)
+            grid.update(); grid.layoutSubtreeIfNeeded()
+            let bottomRegion = grid.regions[3]
+            let bottomDocumentHeight = bottomRegion.scroll.documentView?.frame.height ?? 0
+            let bottomVisibleHeight = bottomRegion.scroll.contentView.bounds.height
+            let bottomOrigin = NSPoint(x: 90, y: max(1, bottomDocumentHeight - bottomVisibleHeight - 10))
+            bottomRegion.scroll.contentView.scroll(to: bottomOrigin)
+            bottomRegion.scroll.reflectScrolledClipView(bottomRegion.scroll.contentView)
+            grid.sync(from: 3)
+            let beforeBottomEdit = bottomRegion.scroll.contentView.bounds.origin
+            editor.edit([GridAddress(row: bottomRow, column: 0): "bottom edit keeps position"])
+            grid.update(); grid.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            let afterBottomEdit = bottomRegion.scroll.contentView.bounds.origin
+            try require(beforeBottomEdit.y > 0 && afterBottomEdit.y > 0 &&
+                        abs(afterBottomEdit.x - beforeBottomEdit.x) < 1 &&
+                        abs(afterBottomEdit.y - beforeBottomEdit.y) < 2,
+                        "多表并排长表底部编辑后滚动位置跳回顶部")
             editor.frozenRows = 0; editor.frozenColumns = 0; grid.update()
             try require(grid.regions.count == 1 && grid.regions[0].range.lowerBound == 0 &&
                         grid.regions[0].table.dataColumn(0) == -1 &&

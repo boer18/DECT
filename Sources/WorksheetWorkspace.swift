@@ -54,6 +54,18 @@ struct GridFillRecord: Identifiable {
     let column: Int
     let mode: GridFillMode
 }
+enum GridInsertAxis: String, Equatable {
+    case rows
+    case columns
+}
+struct GridInsertOperation: Equatable {
+    let axis: GridInsertAxis
+    /// Zero-based position in the worksheet as it exists when this operation
+    /// is applied. Keeping operations in order lets later insertions refer to
+    /// the coordinates the user actually sees.
+    let index: Int
+    let count: Int
+}
 struct GridSearchEntry: Sendable {
     let address: GridAddress
     let searchableText: String
@@ -142,8 +154,51 @@ enum GridWorkbookIO {
         return GridSnapshot(fileURL: file, fingerprint: before, sheets: sheets, sheet: sheet, cells: cells,
                             rowCount: maxRow + 1, columnCount: maxColumn + 1)
     }
-    static func save(_ snapshot: GridSnapshot, changes: [GridAddress: String], formulaAddresses: Set<GridAddress> = []) throws -> GridSnapshot {
-        guard !changes.isEmpty else { return snapshot }
+
+    /// Convert a source worksheet coordinate to the visible coordinate after
+    /// the recorded insertions have been applied.
+    static func addressAfterInsertions(_ address: GridAddress,
+                                       insertions: [GridInsertOperation]) -> GridAddress {
+        var result = address
+        for insertion in insertions {
+            switch insertion.axis {
+            case .rows where result.row >= insertion.index:
+                result = GridAddress(row: result.row + insertion.count, column: result.column)
+            case .columns where result.column >= insertion.index:
+                result = GridAddress(row: result.row, column: result.column + insertion.count)
+            default:
+                break
+            }
+        }
+        return result
+    }
+
+    /// Convert a visible coordinate back to a source coordinate. A nil result
+    /// means that the coordinate belongs to a newly inserted blank row/column.
+    static func addressBeforeInsertions(_ address: GridAddress,
+                                        insertions: [GridInsertOperation]) -> GridAddress? {
+        var result = address
+        for insertion in insertions.reversed() {
+            switch insertion.axis {
+            case .rows:
+                if result.row >= insertion.index + insertion.count {
+                    result = GridAddress(row: result.row - insertion.count, column: result.column)
+                } else if result.row >= insertion.index {
+                    return nil
+                }
+            case .columns:
+                if result.column >= insertion.index + insertion.count {
+                    result = GridAddress(row: result.row, column: result.column - insertion.count)
+                } else if result.column >= insertion.index {
+                    return nil
+                }
+            }
+        }
+        return result
+    }
+
+    static func save(_ snapshot: GridSnapshot, changes: [GridAddress: String], formulaAddresses: Set<GridAddress> = [], insertions: [GridInsertOperation] = []) throws -> GridSnapshot {
+        guard !changes.isEmpty || !insertions.isEmpty else { return snapshot }
         guard try fingerprint(snapshot.fileURL) == snapshot.fingerprint else {
             throw WorkspaceError(message: "原表已被其他操作修改。当前编辑已保留，请复制需要的内容后重新读取，再核对保存。")
         }
@@ -170,6 +225,109 @@ enum GridWorkbookIO {
             element.removeAttribute(forName: name)
             element.addAttribute(XMLNode.attribute(withName: name, stringValue: value) as! XMLNode)
         }
+        func rowNumber(_ row: XMLElement) -> Int? {
+            guard let value = row.attribute(forName: "r")?.stringValue else { return nil }
+            return Int(value)
+        }
+        func updateCellReferences(in row: XMLElement, axis: GridInsertAxis, index: Int, count: Int) {
+            for cell in elements(row, "c") {
+                guard let reference = cell.attribute(forName: "r")?.stringValue,
+                      let address = GridAddress(reference) else { continue }
+                let shifted: GridAddress
+                switch axis {
+                case .rows:
+                    shifted = address.row >= index
+                        ? GridAddress(row: address.row + count, column: address.column)
+                        : address
+                case .columns:
+                    shifted = address.column >= index
+                        ? GridAddress(row: address.row, column: address.column + count)
+                        : address
+                }
+                if shifted != address { attribute(cell, "r", shifted.reference) }
+            }
+        }
+        func shiftedFormula(_ value: String, axis: GridInsertAxis, index: Int, count: Int) -> String {
+            guard let regex = try? NSRegularExpression(
+                pattern: "(?<![A-Za-z0-9_])(\\$?)([A-Za-z]{1,3})(\\$?)([0-9]+)") else { return value }
+            let original = value as NSString
+            let fullRange = NSRange(location: 0, length: original.length)
+            var result = value
+            for match in regex.matches(in: value, range: fullRange).reversed() {
+                let prefix = original.substring(with: NSRange(location: 0, length: match.range.location))
+                if prefix.filter({ $0 == "\"" }).count % 2 == 1 { continue }
+                let letters = original.substring(with: match.range(at: 2)).uppercased()
+                guard let row = Int(original.substring(with: match.range(at: 4))) else { continue }
+                let column = letters.unicodeScalars.reduce(0) { $0 * 26 + Int($1.value) - 64 } - 1
+                let shiftedRow = axis == .rows && row - 1 >= index ? row + count : row
+                let shiftedColumn = axis == .columns && column >= index ? column + count : column
+                let replacement = "\(original.substring(with: match.range(at: 1)))\(GridAddress.columnName(shiftedColumn))\(original.substring(with: match.range(at: 3)))\(shiftedRow)"
+                guard let stringRange = Range(match.range, in: result) else { continue }
+                result.replaceSubrange(stringRange, with: replacement)
+            }
+            return result
+        }
+        func updateFormulaReferences(axis: GridInsertAxis, index: Int, count: Int) {
+            guard let formulaNodes = try? xml.nodes(forXPath: "//*[local-name()='f']") else { return }
+            for case let formula as XMLElement in formulaNodes {
+                let old = formula.stringValue ?? ""
+                let updated = shiftedFormula(old, axis: axis, index: index, count: count)
+                guard updated != old else { continue }
+                for child in (formula.children ?? []).reversed() { child.detach() }
+                textNode(formula, updated)
+            }
+        }
+        func insertRows(at index: Int, count: Int) throws {
+            guard count > 0, index >= 0, index + count <= 1_048_576 else {
+                throw WorkspaceError(message: "插入行超出了 Excel 支持的范围。")
+            }
+            let insertionRow = index + 1
+            let existingRows = elements(sheetData, "row")
+            for row in existingRows.reversed() {
+                guard let number = rowNumber(row), number >= insertionRow else { continue }
+                attribute(row, "r", String(number + count))
+                updateCellReferences(in: row, axis: .rows, index: index, count: count)
+            }
+            let insertionIndex = elements(sheetData, "row")
+                .first(where: { (rowNumber($0) ?? Int.max) >= insertionRow })?.index ?? sheetData.childCount
+            for offset in 0..<count {
+                let row = node("row")
+                attribute(row, "r", String(insertionRow + offset))
+                sheetData.insertChild(row, at: min(insertionIndex + offset, sheetData.childCount))
+            }
+            updateFormulaReferences(axis: .rows, index: index, count: count)
+        }
+        func insertColumns(at index: Int, count: Int) throws {
+            guard count > 0, index >= 0, index + count <= 16_384 else {
+                throw WorkspaceError(message: "插入列超出了 Excel 支持的范围。")
+            }
+            for row in elements(sheetData, "row") {
+                updateCellReferences(in: row, axis: .columns, index: index, count: count)
+            }
+            // Keep existing column formatting ranges covering the inserted
+            // columns. This matches Excel's useful visual behavior for blank
+            // inserted columns without rebuilding the workbook's styles.
+            if let cols = elements(xml.rootElement()!, "cols").first {
+                for column in elements(cols, "col") {
+                    guard let minValue = Int(column.attribute(forName: "min")?.stringValue ?? ""),
+                          let maxValue = Int(column.attribute(forName: "max")?.stringValue ?? "") else { continue }
+                    let insertionColumn = index + 1
+                    if minValue >= insertionColumn {
+                        attribute(column, "min", String(minValue + count))
+                        attribute(column, "max", String(maxValue + count))
+                    } else if maxValue >= insertionColumn {
+                        attribute(column, "max", String(maxValue + count))
+                    }
+                }
+            }
+            updateFormulaReferences(axis: .columns, index: index, count: count)
+        }
+        for insertion in insertions {
+            switch insertion.axis {
+            case .rows: try insertRows(at: insertion.index, count: insertion.count)
+            case .columns: try insertColumns(at: insertion.index, count: insertion.count)
+            }
+        }
         var rows: [Int: XMLElement] = [:]
         for row in elements(sheetData, "row") {
             if let value = row.attribute(forName: "r")?.stringValue, let number = Int(value) { rows[number - 1] = row }
@@ -194,7 +352,8 @@ enum GridWorkbookIO {
             }
             for child in (cell.children ?? []).reversed() { child.detach() }
             let value = cleanText(rawText)
-            if (formulaAddresses.contains(address) || snapshot.cells[address]?.formula == true), let formula = formulaBody(value) {
+            let sourceAddress = addressBeforeInsertions(address, insertions: insertions)
+            if (formulaAddresses.contains(address) || sourceAddress.flatMap({ snapshot.cells[$0]?.formula }) == true), let formula = formulaBody(value) {
                 // XLSX stores formulas without the leading '='. Keep a string
                 // result type when the original formula used one; otherwise
                 // let Excel treat the recalculated result as numeric/general.
@@ -226,8 +385,16 @@ enum GridWorkbookIO {
             }
         }
         if let dimension = elements(xml.rootElement()!, "dimension").first {
-            let maxRow = max(snapshot.rowCount - 1, changes.keys.map(\.row).max() ?? 0)
-            let maxColumn = max(snapshot.columnCount - 1, changes.keys.map(\.column).max() ?? 0)
+            var maxRow = max(0, snapshot.rowCount - 1)
+            var maxColumn = max(0, snapshot.columnCount - 1)
+            for insertion in insertions {
+                switch insertion.axis {
+                case .rows: maxRow += insertion.count
+                case .columns: maxColumn += insertion.count
+                }
+            }
+            maxRow = max(maxRow, changes.keys.map(\.row).max() ?? 0)
+            maxColumn = max(maxColumn, changes.keys.map(\.column).max() ?? 0)
             attribute(dimension, "ref", "A1:\(GridAddress(row: maxRow, column: maxColumn).reference)")
         }
         let data = xml.xmlData(options: [.nodePreserveAll])
@@ -240,7 +407,8 @@ enum GridWorkbookIO {
         let validated = try read(replacement, sheetPath: snapshot.sheet.archivePath)
         for (address, text) in changes {
             let clean = cleanText(text)
-            if (formulaAddresses.contains(address) || snapshot.cells[address]?.formula == true), let expectedFormula = formulaBody(clean) {
+            let sourceAddress = addressBeforeInsertions(address, insertions: insertions)
+            if (formulaAddresses.contains(address) || sourceAddress.flatMap({ snapshot.cells[$0]?.formula }) == true), let expectedFormula = formulaBody(clean) {
                 guard validated.cells[address]?.formula == true,
                       validated.cells[address]?.formulaText == expectedFormula else {
                     throw WorkspaceError(message: "\(address.reference) 公式写入核验失败，原表未修改。")
@@ -252,7 +420,9 @@ enum GridWorkbookIO {
                 }
             }
         }
-        for (address, cell) in snapshot.cells where changes[address] == nil {
+        for (sourceAddress, cell) in snapshot.cells {
+            let address = addressAfterInsertions(sourceAddress, insertions: insertions)
+            guard changes[address] == nil else { continue }
             guard validated.cells[address]?.text == cell.text, validated.cells[address]?.formula == cell.formula else {
                 throw WorkspaceError(message: "相邻单元格核验失败，原表未修改。")
             }
@@ -307,6 +477,7 @@ enum GridClipboard {
 final class GridEditorModel: ObservableObject {
     @Published var snapshot: GridSnapshot? { didSet { rowHeights.removeAll() } }
     @Published var changes: [GridAddress: String] = [:] { didSet { rowHeights.removeAll() } }
+    @Published var insertions: [GridInsertOperation] = [] { didSet { rowHeights.removeAll() } }
     @Published var anchor = GridAddress(row: 0, column: 0)
     @Published var extent = GridAddress(row: 0, column: 0)
     @Published var isBusy = false
@@ -371,8 +542,19 @@ final class GridEditorModel: ObservableObject {
     func resetCellLayout() { columnWidths = [:]; adaptiveRows = false; revision += 1 }
     var onActivate: (() -> Void)?
     private var axisSelection: String?
-    var usedRowCount: Int { max(1, max(snapshot?.rowCount ?? 0, (changes.keys.map(\.row).max() ?? -1) + 1)) }
-    var usedColumnCount: Int { min(256, max(1, max(snapshot?.columnCount ?? 0, (changes.keys.map(\.column).max() ?? -1) + 1))) }
+    var hasPendingChanges: Bool { !changes.isEmpty || !insertions.isEmpty }
+    private var insertedRowCount: Int { insertions.filter { $0.axis == .rows }.reduce(0) { $0 + $1.count } }
+    private var insertedColumnCount: Int { insertions.filter { $0.axis == .columns }.reduce(0) { $0 + $1.count } }
+    var usedRowCount: Int {
+        let sourceCount = (snapshot?.rowCount ?? 0) + insertedRowCount
+        let editedCount = (changes.keys.map(\.row).max() ?? -1) + 1
+        return max(1, max(sourceCount, editedCount))
+    }
+    var usedColumnCount: Int {
+        let sourceCount = (snapshot?.columnCount ?? 0) + insertedColumnCount
+        let editedCount = (changes.keys.map(\.column).max() ?? -1) + 1
+        return min(256, max(1, max(sourceCount, editedCount)))
+    }
     private static func roundedUp(_ value: Int, toMultiple multiple: Int) -> Int {
         guard value > 0 else { return 0 }
         return ((value + multiple - 1) / multiple) * multiple
@@ -410,9 +592,69 @@ final class GridEditorModel: ObservableObject {
         }
         frozenRows = r; frozenColumns = c; revision += 1
     }
+    func promptInsert(axis: GridInsertAxis, at index: Int, title: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = axis == .rows
+            ? "请输入要插入的行数，默认 1 行。"
+            : "请输入要插入的列数，默认 1 列。"
+        let field = NSTextField(string: "1")
+        field.alignment = .right
+        field.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        alert.accessoryView = field
+        alert.addButton(withTitle: "插入")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let count = Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), count > 0 else {
+            message = "插入数量必须是正整数。"; isError = true; return
+        }
+        insert(axis: axis, at: index, count: count)
+    }
+    func insert(axis: GridInsertAxis, at index: Int, count: Int) {
+        guard !isBusy, snapshot != nil else { return }
+        let limit = axis == .rows ? 1_048_576 : 256
+        let currentLimit = axis == .rows ? rowCount : columnCount
+        guard count > 0, index >= 0, index <= currentLimit, index + count <= limit else {
+            message = axis == .rows
+                ? "插入行超出了 Excel 支持的范围。"
+                : "内置表格最多显示 256 列，请减少插入数量。"
+            isError = true
+            return
+        }
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
+        if history.count > 50 { history.removeFirst() }
+        redoHistory = []
+        func shifted(_ address: GridAddress) -> GridAddress {
+            switch axis {
+            case .rows where address.row >= index:
+                return GridAddress(row: address.row + count, column: address.column)
+            case .columns where address.column >= index:
+                return GridAddress(row: address.row, column: address.column + count)
+            default:
+                return address
+            }
+        }
+        changes = Dictionary(uniqueKeysWithValues: changes.map { (shifted($0.key), $0.value) })
+        formulaAddresses = Set(formulaAddresses.map(shifted))
+        insertions.append(GridInsertOperation(axis: axis, index: index, count: count))
+        lastFill = nil; fillPreviewTarget = nil
+        switch axis {
+        case .rows:
+            anchor = GridAddress(row: index, column: 0)
+            extent = GridAddress(row: index + count - 1, column: usedColumnCount - 1)
+            axisSelection = "row"
+        case .columns:
+            anchor = GridAddress(row: 0, column: index)
+            extent = GridAddress(row: usedRowCount - 1, column: index + count - 1)
+            axisSelection = "column"
+        }
+        revision += 1; message = "已插入 \(count) \(axis == .rows ? "行" : "列")，可用 ⌘Z 撤销。"; isError = false
+        refreshSearch()
+    }
     private struct EditorState {
         let changes: [GridAddress: String]
         let formulaAddresses: Set<GridAddress>
+        let insertions: [GridInsertOperation]
     }
     private var history: [EditorState] = []
     private var redoHistory: [EditorState] = []
@@ -428,7 +670,7 @@ final class GridEditorModel: ObservableObject {
         let stamp = Self.stamp(snapshot.fileURL)
         guard let previous = observedStamp else { observedStamp = stamp; return }
         guard stamp != previous else { return }
-        guard changes.isEmpty else {
+        guard !hasPendingChanges else {
             message = "原文件已变化；当前编辑仍保留，自动刷新已暂停。请先复制需要的内容，再重新读取。"; isError = true; return
         }
         // Do not reload underneath an active in-cell or formula-bar editor.
@@ -438,11 +680,11 @@ final class GridEditorModel: ObservableObject {
             let result = Result { try GridWorkbookIO.read(snapshot.fileURL, sheetPath: snapshot.sheet.archivePath) }
             DispatchQueue.main.async {
                 self.checkingExternal = false
-                guard self.changes.isEmpty, self.snapshot?.fingerprint == snapshot.fingerprint,
+                guard !self.hasPendingChanges, self.snapshot?.fingerprint == snapshot.fingerprint,
                       self.snapshot?.sheet == snapshot.sheet, !self.isBusy else { return }
                 switch result {
                 case .success(let updated):
-                    self.snapshot = updated; self.observedStamp = Self.stamp(updated.fileURL)
+                    self.snapshot = updated; self.insertions = []; self.observedStamp = Self.stamp(updated.fileURL)
                     self.history = []; self.redoHistory = []; self.formulaAddresses = []; self.revision += 1
                     self.refreshSearch()
                     self.message = "已自动刷新外部修改"; self.isError = false
@@ -467,7 +709,8 @@ final class GridEditorModel: ObservableObject {
 
     private func searchEntries() -> [GridSearchEntry] {
         guard let snapshot else { return [] }
-        let addresses = Set(snapshot.cells.keys).union(changes.keys).sorted {
+        let sourceAddresses = snapshot.cells.keys.map(displayAddress)
+        let addresses = Set(sourceAddresses).union(changes.keys).sorted {
             ($0.row, $0.column) < ($1.row, $1.column)
         }
         return addresses.compactMap { address in
@@ -552,28 +795,34 @@ final class GridEditorModel: ObservableObject {
     // when entering B201 in a sheet whose source ends at row 200). Expand in
     // fixed blocks only after the user reaches the current buffer boundary.
     var rowCount: Int {
-        let sourceCount = snapshot?.rowCount ?? 0
-        let editedCount = (changes.keys.map(\.row).max() ?? -1) + 1
+        let sourceCount = usedRowCount
         let baseline = max(40, Self.roundedUp(sourceCount + 20, toMultiple: 20))
-        let required = Self.roundedUp(max(sourceCount, editedCount), toMultiple: 20)
+        let required = Self.roundedUp(sourceCount, toMultiple: 20)
         return max(baseline, required)
     }
     var columnCount: Int {
-        let sourceCount = snapshot?.columnCount ?? 0
-        let editedCount = (changes.keys.map(\.column).max() ?? -1) + 1
+        let sourceCount = usedColumnCount
         let baseline = max(12, Self.roundedUp(sourceCount + 2, toMultiple: 8))
-        let required = Self.roundedUp(max(sourceCount, editedCount), toMultiple: 8)
+        let required = Self.roundedUp(sourceCount, toMultiple: 8)
         return min(256, max(baseline, required))
     }
+    private func sourceAddress(_ address: GridAddress) -> GridAddress? {
+        GridWorkbookIO.addressBeforeInsertions(address, insertions: insertions)
+    }
+    private func displayAddress(_ address: GridAddress) -> GridAddress {
+        GridWorkbookIO.addressAfterInsertions(address, insertions: insertions)
+    }
     func sourceText(_ address: GridAddress) -> String {
-        guard let cell = snapshot?.cells[address] else { return "" }
+        guard let source = sourceAddress(address), let cell = snapshot?.cells[source] else { return "" }
         return cell.formula ? "=\(cell.formulaText ?? "")" : cell.text
     }
     func inputText(_ address: GridAddress) -> String { changes[address] ?? sourceText(address) }
-    func text(_ address: GridAddress) -> String { changes[address] ?? snapshot?.cells[address]?.text ?? "" }
+    func text(_ address: GridAddress) -> String {
+        changes[address] ?? sourceAddress(address).flatMap { snapshot?.cells[$0]?.text } ?? ""
+    }
     func load(_ file: URL, sheetPath: String? = nil) {
         guard !isBusy else { return }
-        guard changes.isEmpty else { message = "当前表有未保存修改，请先保存或撤销后切换。"; isError = true; return }
+        guard !hasPendingChanges else { message = "当前表有未保存修改，请先保存或撤销后切换。"; isError = true; return }
         isBusy = true; message = nil; isError = false
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try GridWorkbookIO.read(file, sheetPath: sheetPath) }
@@ -581,7 +830,7 @@ final class GridEditorModel: ObservableObject {
                 self.isBusy = false
                 switch result {
                 case .success(let value):
-                    self.snapshot = value; self.history = []; self.redoHistory = []; self.formulaAddresses = []
+                    self.snapshot = value; self.insertions = []; self.history = []; self.redoHistory = []; self.formulaAddresses = []
                     self.lastFill = nil; self.fillPreviewTarget = nil
                     self.observedStamp = Self.stamp(value.fileURL)
                     self.anchor = GridAddress(row: 0, column: 0); self.extent = self.anchor; self.revision += 1
@@ -602,11 +851,11 @@ final class GridEditorModel: ObservableObject {
         let hasChange = updates.contains { address, value in
             let clean = GridWorkbookIO.cleanText(value)
             return inputText(address) != clean ||
-                (newFormulaAddresses.contains(address) && !formulaAddresses.contains(address) && snapshot?.cells[address]?.formula != true)
+                (newFormulaAddresses.contains(address) && !formulaAddresses.contains(address) && !isFormula(address))
         }
         guard hasChange else { return }
         lastFill = nil; fillPreviewTarget = nil
-        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
         if history.count > 50 { history.removeFirst() }
         redoHistory = []
         for (address, value) in updates {
@@ -618,7 +867,7 @@ final class GridEditorModel: ObservableObject {
                 if newFormulaAddresses.contains(address) ||
                     (formulaAddresses.contains(address) && GridWorkbookIO.formulaBody(clean) != nil) {
                     formulaAddresses.insert(address)
-                } else if snapshot?.cells[address]?.formula != true {
+                } else if !isFormula(address) {
                     formulaAddresses.remove(address)
                 }
             }
@@ -627,7 +876,7 @@ final class GridEditorModel: ObservableObject {
         refreshSearch()
     }
     private func isFormula(_ address: GridAddress) -> Bool {
-        formulaAddresses.contains(address) || snapshot?.cells[address]?.formula == true
+        formulaAddresses.contains(address) || sourceAddress(address).flatMap { snapshot?.cells[$0]?.formula } == true
     }
     private static func numberValue(_ value: String) -> Double? {
         guard value.range(of: "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", options: .regularExpression) != nil,
@@ -899,36 +1148,51 @@ final class GridEditorModel: ObservableObject {
     func clearSelection() { edit(Dictionary(uniqueKeysWithValues: rows.flatMap { row in columns.map { (GridAddress(row: row, column: $0), "") } })) }
     func undo() {
         guard let previous = history.popLast(), !isBusy else { return }
-        redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
-        changes = previous.changes; formulaAddresses = previous.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
+        redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
+        changes = previous.changes; formulaAddresses = previous.formulaAddresses; insertions = previous.insertions
+        lastFill = nil; fillPreviewTarget = nil; revision += 1
         refreshSearch()
     }
     func redo() {
         guard let next = redoHistory.popLast(), !isBusy else { return }
-        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses))
-        changes = next.changes; formulaAddresses = next.formulaAddresses; lastFill = nil; fillPreviewTarget = nil; revision += 1
+        history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
+        changes = next.changes; formulaAddresses = next.formulaAddresses; insertions = next.insertions
+        lastFill = nil; fillPreviewTarget = nil; revision += 1
         refreshSearch()
     }
     func save(afterSave: (() -> Void)? = nil) {
         guard !isBusy, let snapshot else { return }
-        guard !changes.isEmpty else { afterSave?(); return }
-        let updates = changes, formulaUpdates = formulaAddresses
-        isBusy = true; message = "正在保存 \(updates.count) 个单元格…"; isError = false
+        guard hasPendingChanges else { afterSave?(); return }
+        let updates = changes, formulaUpdates = formulaAddresses, pendingInsertions = insertions
+        isBusy = true; message = "正在保存 \(updates.count) 个单元格及 \(pendingInsertions.count) 次结构调整…"; isError = false
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try GridWorkbookIO.save(snapshot, changes: updates, formulaAddresses: formulaUpdates) }
+            let result = Result { try GridWorkbookIO.save(snapshot, changes: updates, formulaAddresses: formulaUpdates, insertions: pendingInsertions) }
             DispatchQueue.main.async {
                 self.isBusy = false
                 switch result {
                 case .success(let saved):
-                    self.snapshot = saved; self.changes = [:]; self.history = []; self.redoHistory = []; self.formulaAddresses = []
+                    self.snapshot = saved; self.changes = [:]; self.insertions = []; self.history = []; self.redoHistory = []; self.formulaAddresses = []
                     self.lastFill = nil; self.fillPreviewTarget = nil; self.revision += 1
                     self.observedStamp = Self.stamp(saved.fileURL)
                     self.refreshSearch()
-                    self.message = "已保存 \(updates.count) 个单元格"; afterSave?()
+                    self.message = "已保存 \(updates.count) 个单元格及 \(pendingInsertions.count) 次结构调整"; afterSave?()
                 case .failure(let error): self.message = error.localizedDescription; self.isError = true
                 }
             }
         }
+    }
+}
+
+final class GridInsertMenuTarget: NSObject {
+    private let action: () -> Void
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+        super.init()
+    }
+
+    @objc func invoke(_ sender: Any?) {
+        action()
     }
 }
 
@@ -943,6 +1207,19 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     private var markedAddress: GridAddress?
     private var markedBase = ""
     private var handledTextInputEvent = false
+    private var insertMenuTargets: [GridInsertMenuTarget] = []
+
+    private func showInsertMenu(at point: NSPoint, items: [(String, () -> Void)]) {
+        let menu = NSMenu()
+        insertMenuTargets = items.map { title, action in
+            let target = GridInsertMenuTarget(action: action)
+            let item = NSMenuItem(title: title, action: #selector(GridInsertMenuTarget.invoke(_:)), keyEquivalent: "")
+            item.target = target
+            menu.addItem(item)
+            return target
+        }
+        menu.popUp(positioning: nil, at: point, in: self)
+    }
 
     func endDirectTyping() {
         directTypingAddress = nil
@@ -1181,6 +1458,27 @@ final class CellGridTable: NSTableView, NSTextInputClient {
             editColumn(localColumn, row: localRow, with: nil, select: true)
         }
     }
+    override func rightMouseDown(with event: NSEvent) {
+        guard let editor, !editor.isBusy else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let localRow = row(at: point)
+        let localColumn = column(at: point)
+        let c = dataColumn(localColumn)
+        guard localRow >= 0, c == -1 else {
+            super.rightMouseDown(with: event)
+            return
+        }
+        let row = localRow + rowOffset
+        guard row >= 0, row < editor.rowCount else { return }
+        editor.onActivate?()
+        endDirectTyping()
+        window?.makeFirstResponder(self)
+        editor.selectRows(row, extending: false)
+        showInsertMenu(at: point, items: [
+            ("向上插入行…", { [weak editor] in editor?.promptInsert(axis: .rows, at: row, title: "向上插入行") }),
+            ("向下插入行…", { [weak editor] in editor?.promptInsert(axis: .rows, at: row + 1, title: "向下插入行") })
+        ])
+    }
     override func mouseDragged(with event: NSEvent) {
         if filling {
             autoscroll(with: event)
@@ -1287,6 +1585,7 @@ final class GridColumnHeader: NSTableHeaderView {
     private var resizeStartX: CGFloat = 0
     private var resizeStartWidth: CGFloat = 0
     private(set) var appliedZoom: CGFloat = 1
+    private var insertMenuTargets: [GridInsertMenuTarget] = []
 
     func applyZoom(_ value: CGFloat) {
         let zoom = min(2.5, max(0.5, value))
@@ -1317,6 +1616,31 @@ final class GridColumnHeader: NSTableHeaderView {
         table.endDirectTyping()
         table.editor?.onActivate?()
         if c >= 0 { editor.selectColumns(c, extending: event.modifierFlags.contains(.shift)) }
+    }
+    override func rightMouseDown(with event: NSEvent) {
+        guard let table = tableView as? CellGridTable, let editor = table.editor,
+              !editor.isBusy else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let c = table.dataColumn(column(at: point))
+        guard c >= 0, c < editor.columnCount else {
+            super.rightMouseDown(with: event)
+            return
+        }
+        table.endDirectTyping()
+        table.window?.makeFirstResponder(table)
+        table.editor?.onActivate?()
+        editor.selectColumns(c, extending: false)
+        let menu = NSMenu()
+        insertMenuTargets = [
+            GridInsertMenuTarget(action: { [weak editor] in editor?.promptInsert(axis: .columns, at: c, title: "向左插入列") }),
+            GridInsertMenuTarget(action: { [weak editor] in editor?.promptInsert(axis: .columns, at: c + 1, title: "向右插入列") })
+        ]
+        for (index, title) in ["向左插入列…", "向右插入列…"].enumerated() {
+            let item = NSMenuItem(title: title, action: #selector(GridInsertMenuTarget.invoke(_:)), keyEquivalent: "")
+            item.target = insertMenuTargets[index]
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: point, in: self)
     }
     override func mouseDragged(with event: NSEvent) {
         if let column = resizingColumn {
@@ -1427,6 +1751,7 @@ final class FrozenGridView: NSView {
     var syncing = false
     var lastRevision = -1
     private var lastSearchRequest = -1
+    private var scrollRestoreGeneration = 0
     var fillOptionsButton: NSButton?
     var fillOptionsPopover: NSPopover?
     private var fillOptionsObservation: AnyCancellable?
@@ -1652,27 +1977,23 @@ final class FrozenGridView: NSView {
                                         previousSignature: String, revision: Int) {
         guard !origins.isEmpty, previousRegionCount == regions.count,
               viewportLayout(previousSignature) == viewportLayout(signature) else { return }
+        scrollRestoreGeneration += 1
+        let generation = scrollRestoreGeneration
         layoutSubtreeIfNeeded()
-        for (index, origin) in origins.enumerated() where index < regions.count {
-            let scroll = regions[index].scroll
-            let clip = scroll.contentView
-            let visibleSize = clip.bounds.size
-            let documentSize = scroll.documentView?.frame.size ?? .zero
-            let maximum = NSPoint(
-                x: max(0, documentSize.width - visibleSize.width),
-                y: max(0, documentSize.height - visibleSize.height))
-            let target = NSPoint(
-                x: min(max(0, origin.x), maximum.x),
-                y: min(max(0, origin.y), maximum.y))
-            clip.scroll(to: target)
-            scroll.reflectScrolledClipView(clip)
-        }
-        if regions.count == 4 { sync(from: 3) }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.model.revision == revision,
-                  self.viewportLayout(previousSignature) == self.viewportLayout(self.signature) else { return }
-            self.layoutSubtreeIfNeeded()
-            self.restoreScrollPositionsImmediately(origins)
+        guard let expectedOrigins = restoreScrollPositionsImmediately(origins) else { return }
+        // NSTableView can finish measuring rows one or two layout passes after
+        // reloadData(). Retry after those passes; otherwise a bottom edit in a
+        // split view is briefly clamped to y=0 and stays there. The expected
+        // origin guard makes these retries harmless if the user starts a new
+        // scroll before the deferred layout has completed.
+        for delay in [0.016, 0.05, 0.15] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.scrollRestoreGeneration == generation,
+                      self.model.revision == revision,
+                      self.viewportLayout(previousSignature) == self.viewportLayout(self.signature) else { return }
+                self.layoutSubtreeIfNeeded()
+                _ = self.restoreScrollPositionsImmediately(origins, onlyIfCurrentOrigins: expectedOrigins)
+            }
         }
     }
 
@@ -1680,8 +2001,16 @@ final class FrozenGridView: NSView {
         value.split(separator: "/").prefix(2).joined(separator: "/")
     }
 
-    private func restoreScrollPositionsImmediately(_ origins: [NSPoint]) {
-        guard origins.count == regions.count else { return }
+    private func restoreScrollPositionsImmediately(_ origins: [NSPoint],
+                                                   onlyIfCurrentOrigins expected: [NSPoint]? = nil) -> [NSPoint]? {
+        guard origins.count == regions.count else { return nil }
+        if let expected {
+            let current = regions.map { $0.scroll.contentView.bounds.origin }
+            guard current.count == expected.count,
+                  !zip(current, expected).contains(where: { abs($0.0.x - $0.1.x) > 1 || abs($0.0.y - $0.1.y) > 1 }) else {
+                return nil
+            }
+        }
         for (index, origin) in origins.enumerated() {
             let scroll = regions[index].scroll
             let clip = scroll.contentView
@@ -1697,6 +2026,7 @@ final class FrozenGridView: NSView {
             scroll.reflectScrolledClipView(clip)
         }
         if regions.count == 4 { sync(from: 3) }
+        return regions.map { $0.scroll.contentView.bounds.origin }
     }
     override func layout() {
         super.layout()
@@ -1761,7 +2091,10 @@ final class WorksheetScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
             window?.makeFirstResponder(nil)
-            if let editor { editor.setZoom(editor.zoom * exp(-event.scrollingDeltaY * 0.01)) }
+            // NSEvent's positive vertical delta represents an upward wheel
+            // movement. Keep that direction intuitive for spreadsheet zoom:
+            // up enlarges, down reduces.
+            if let editor { editor.setZoom(editor.zoom * exp(event.scrollingDeltaY * 0.01)) }
             return
         }
 
@@ -1777,9 +2110,10 @@ final class WorksheetScrollView: NSScrollView {
         let maximum = NSPoint(x: max(0, documentSize.width - visibleSize.width),
                               y: max(0, documentSize.height - visibleSize.height))
         let origin = clip.bounds.origin
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1.8 : 3.0
         let target = NSPoint(
-            x: min(max(0, origin.x - event.scrollingDeltaX), maximum.x),
-            y: min(max(0, origin.y - event.scrollingDeltaY), maximum.y))
+            x: min(max(0, origin.x - event.scrollingDeltaX * multiplier), maximum.x),
+            y: min(max(0, origin.y - event.scrollingDeltaY * multiplier), maximum.y))
         if target != origin {
             clip.scroll(to: target)
             reflectScrolledClipView(clip)
@@ -1937,11 +2271,11 @@ struct GridEditorPane: View {
                 .padding(.horizontal, 8).frame(width: 290, height: 27)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
                 Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(!model.canUndo || model.isBusy).help("撤销 ⌘Z")
-                Button("保存\(model.changes.isEmpty ? "" : "（\(model.changes.count)）")") { commit(); model.save() }
-                    .buttonStyle(.borderedProminent).disabled(model.changes.isEmpty || model.isBusy)
+                Button("保存\(model.hasPendingChanges ? "（待保存）" : "")") { commit(); model.save() }
+                    .buttonStyle(.borderedProminent).disabled(!model.hasPendingChanges || model.isBusy)
                 Menu {
                     Button("保存并导表") { commit(); model.save(afterSave: exportAction) }.disabled(exportAction == nil)
-                    Button("重新读取") { if let s = model.snapshot { model.load(s.fileURL, sheetPath: s.sheet.archivePath) } }.disabled(!model.changes.isEmpty)
+                    Button("重新读取") { if let s = model.snapshot { model.load(s.fileURL, sheetPath: s.sheet.archivePath) } }.disabled(model.hasPendingChanges)
                     Button("外部打开") { if let s = model.snapshot { NSWorkspace.shared.open(s.fileURL) } }
                     Button("在 Finder 中显示") { if let s = model.snapshot { NSWorkspace.shared.activateFileViewerSelecting([s.fileURL]) } }
                 } label: { Image(systemName: "ellipsis") }.disabled(model.isBusy || model.snapshot == nil)
@@ -1952,7 +2286,7 @@ struct GridEditorPane: View {
                         ForEach(snapshot.sheets) { sheet in
                             Button(sheet.name) { model.load(snapshot.fileURL, sheetPath: sheet.archivePath) }
                                 .buttonStyle(.bordered).tint(sheet == snapshot.sheet ? .accentColor : .secondary)
-                                .disabled(model.isBusy || !model.changes.isEmpty)
+                                .disabled(model.isBusy || model.hasPendingChanges)
                         }
                     }.padding(.horizontal, 12).padding(.bottom, 8)
                 }

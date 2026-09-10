@@ -36,14 +36,14 @@ final class TableWorkspaceModel: ObservableObject {
             for id in self.openIDs { self.documents[id]?.refreshIfChanged() }
         }
     }
-    var hasPendingChanges: Bool { documents.values.contains { !$0.changes.isEmpty } }
+    var hasPendingChanges: Bool { documents.values.contains { $0.hasPendingChanges } }
     var isBusy: Bool { documents.values.contains(where: \.isBusy) }
     func editor(_ id: String) -> GridEditorModel? { documents[id] }
     func table(_ id: String) -> ProjectTable? { metadata[id] }
     func preview(_ table: ProjectTable) {
         guard !split else { open(table); return }
         guard !openIDs.contains(table.id) else { activeID = table.id; return }
-        if let id = previewID, documents[id]?.changes.isEmpty == true {
+        if let id = previewID, documents[id]?.hasPendingChanges == false {
             remove(id)
         }
         open(table)
@@ -65,10 +65,13 @@ final class TableWorkspaceModel: ObservableObject {
     }
     func close(_ id: String) {
         guard let editor = documents[id], !editor.isBusy else { return }
-        if !editor.changes.isEmpty {
+        if editor.hasPendingChanges {
             let alert = NSAlert()
             alert.messageText = "关闭前保存 \(metadata[id]?.name ?? "表格")？"
-            alert.informativeText = "此表有 \(editor.changes.count) 个未保存修改。"
+            let detail = editor.insertions.isEmpty
+                ? "此表有 \(editor.changes.count) 个未保存修改。"
+                : "此表有 \(editor.changes.count) 个单元格修改和 \(editor.insertions.count) 次行列调整未保存。"
+            alert.informativeText = detail
             alert.addButton(withTitle: "保存并关闭"); alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "不保存")
             let result = alert.runModal()
             if result == .alertFirstButtonReturn { editor.save { self.remove(id) }; return }
@@ -87,7 +90,7 @@ final class TableWorkspaceModel: ObservableObject {
         UserDefaults.standard.set(Array(favorites), forKey: "favoriteConfigTables")
     }
     func saveProject(_ project: ExportProject, completion: @escaping () -> Void) {
-        let editors = documents.values.filter { $0.snapshot?.fileURL.path.hasPrefix(project.rootURL.path + "/") == true && !$0.changes.isEmpty }
+        let editors = documents.values.filter { $0.snapshot?.fileURL.path.hasPrefix(project.rootURL.path + "/") == true && $0.hasPendingChanges }
         func next(_ offset: Int) {
             guard offset < editors.count else { completion(); return }
             editors[offset].save { next(offset + 1) }
@@ -219,7 +222,7 @@ struct TableWorkspaceView: View {
                 ForEach(workspace.openIDs, id: \.self) { id in
                     HStack(spacing: 6) {
                         Button { workspace.activeID = id } label: {
-                            Text("\(workspace.table(id)?.projectDisplayPath ?? "") · \(workspace.table(id)?.name ?? "")\(workspace.editor(id)?.changes.isEmpty == false ? " ●" : "")")
+                            Text("\(workspace.table(id)?.projectDisplayPath ?? "") · \(workspace.table(id)?.name ?? "")\(workspace.editor(id)?.hasPendingChanges == true ? " ●" : "")")
                                 .font(.caption).lineLimit(1)
                         }.buttonStyle(.plain)
                         Button { workspace.close(id) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain).help("关闭此表")
