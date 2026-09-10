@@ -481,16 +481,26 @@ enum LanguageWorkbookWriter {
         columnIndex: Int,
         value: String
     ) throws -> String {
-        let rowPattern = "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?row\\b[^>]*\\br=\\\"\(rowIndex)\\\"[^>]*>(?s:.*?)</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?row>"
+        // Excel writers are free to choose the namespace prefix, attribute
+        // order, whitespace around `=`, and quote style.  The reader uses an
+        // XML parser and therefore accepts all of these forms, so the writer
+        // must be equally permissive.  In particular, the project language
+        // tables currently use `<x:row r='2523'>` and `<x:c r='D2523'>`.
+        let rowPattern = "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?row\\b(?=[^>]*\\br\\s*=\\s*(?:\"\(rowIndex)\"|'\(rowIndex)'))[^>]*>(?s:.*?)</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?row\\s*>"
         let rowRegex = try NSRegularExpression(pattern: rowPattern)
-        guard let rowMatch = rowRegex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)) else {
-            throw LanguageWorkbookReaderError(message: "写入失败：Sheet1 中找不到第 \(rowIndex) 行。")
+        let emptyRowPattern = "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?row\\b(?=[^>]*\\br\\s*=\\s*(?:\"\(rowIndex)\"|'\(rowIndex)'))[^>]*/\\s*>"
+        let emptyRowRegex = try NSRegularExpression(pattern: emptyRowPattern)
+        guard let rowMatch = rowRegex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml))
+                ?? emptyRowRegex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)) else {
+            throw LanguageWorkbookReaderError(
+                message: "写入失败：读取到第 \(rowIndex) 行，但写入 XML 时无法定位对应 row 元素。请重新读取语言表后重试。"
+            )
         }
         let rowRange = rowMatch.range
         let rowText = (xml as NSString).substring(with: rowRange)
         let namespacePrefix = xmlPrefix(in: rowText, element: "row")
         let cellReference = "\(columnName(for: columnIndex))\(rowIndex)"
-        let cellPattern = "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\b([^>]*\\br=\\\"\(cellReference)\\\"[^>]*?)\\s*/>|<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\b([^>]*\\br=\\\"\(cellReference)\\\"[^>]*)>(?s:.*?)</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c>"
+        let cellPattern = "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\b(?=[^>]*\\br\\s*=\\s*(?:\"\(cellReference)\"|'\(cellReference)'))([^>]*?)(?:\\s*/\\s*>|>(?s:.*?)</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\s*>)"
         let cellRegex = try NSRegularExpression(pattern: cellPattern)
         let cellTag = inlineStringCell(
             reference: cellReference,
@@ -501,8 +511,7 @@ enum LanguageWorkbookWriter {
 
         var revisedRow = rowText
         if let cellMatch = cellRegex.firstMatch(in: rowText, range: NSRange(rowText.startIndex..., in: rowText)) {
-            let attributeRange = cellMatch.range(at: cellMatch.range(at: 1).location != NSNotFound ? 1 : 2)
-            let attributes = (rowText as NSString).substring(with: attributeRange)
+            let attributes = (rowText as NSString).substring(with: cellMatch.range(at: 1))
             let replacement = inlineStringCell(
                 reference: cellReference,
                 namespacePrefix: namespacePrefix,
@@ -510,6 +519,11 @@ enum LanguageWorkbookWriter {
                 value: value
             )
             revisedRow = (rowText as NSString).replacingCharacters(in: cellMatch.range, with: replacement)
+        } else if let emptyRowRange = rowText.range(of: "\\s*/\\s*>\\s*$", options: .regularExpression) {
+            // A valid worksheet may contain an empty self-closing row. Expand
+            // it only when this update needs to create its first cell.
+            let openingRow = String(rowText[..<emptyRowRange.lowerBound]) + ">"
+            revisedRow = openingRow + cellTag + "</\(namespacePrefix)row>"
         } else {
             revisedRow = try insertingCell(
                 cellTag,
@@ -536,7 +550,14 @@ enum LanguageWorkbookWriter {
                 withTemplate: ""
             )
         }
-        if !keptAttributes.contains("r=\"") && !keptAttributes.contains("r='") {
+        let referenceAttributeRegex = try? NSRegularExpression(
+            pattern: "\\br\\s*=\\s*(?:\"[^\"]*\"|'[^']*')"
+        )
+        let hasReferenceAttribute = referenceAttributeRegex?.firstMatch(
+            in: keptAttributes,
+            range: NSRange(keptAttributes.startIndex..., in: keptAttributes)
+        ) != nil
+        if !hasReferenceAttribute {
             keptAttributes += " r=\"\(reference)\""
         }
         let escapedValue = escapeXML(value)
@@ -554,11 +575,12 @@ enum LanguageWorkbookWriter {
         // attribute, which split the tag itself whenever a blank target cell
         // had to be created (for example, inserting D before `<c r=\"F1201\">`).
         let cellTagRegex = try NSRegularExpression(
-            pattern: "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\b[^>]*\\br\\s*=\\s*\\\"([A-Z]+)[0-9]+\\\"[^>]*>"
+            pattern: "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?c\\b[^>]*\\br\\s*=\\s*(?:\\\"([A-Za-z]+)[0-9]+\\\"|'([A-Za-z]+)[0-9]+')[^>]*>"
         )
         let matches = cellTagRegex.matches(in: rowText, range: NSRange(rowText.startIndex..., in: rowText))
         let insertionLocation = matches.first(where: { match in
-            let letters = (rowText as NSString).substring(with: match.range(at: 1))
+            let lettersRange = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+            let letters = (rowText as NSString).substring(with: lettersRange)
             return columnIndex(fromLetters: letters) > targetColumnIndex
         })?.range.location ?? closingRowLocation(in: rowText, namespacePrefix: namespacePrefix)
         guard insertionLocation != NSNotFound else {
@@ -568,8 +590,11 @@ enum LanguageWorkbookWriter {
     }
 
     private static func closingRowLocation(in rowText: String, namespacePrefix: String) -> Int {
-        let closingTag = "</\(namespacePrefix)row>"
-        return (rowText as NSString).range(of: closingTag).location
+        let escapedPrefix = NSRegularExpression.escapedPattern(for: namespacePrefix)
+        guard let regex = try? NSRegularExpression(pattern: "</\(escapedPrefix)row\\s*>") else {
+            return NSNotFound
+        }
+        return regex.firstMatch(in: rowText, range: NSRange(rowText.startIndex..., in: rowText))?.range.location ?? NSNotFound
     }
 
     private static func xmlPrefix(in text: String, element: String) -> String {
