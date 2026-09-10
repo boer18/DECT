@@ -455,7 +455,10 @@ final class FolderComparisonModel: ObservableObject {
         status = "正在读取 Git 历史…"
         DispatchQueue.global(qos: .utility).async {
             do {
-                let repository = try GitHistoryProvider.discover(projectURL: project.rootURL)
+                let repository = try GitHistoryProvider.discover(
+                    projectURL: project.rootURL,
+                    dataRootURL: project.dataRootURL
+                )
                 let branches = try GitHistoryProvider.branches(repository: repository)
                 let reference = branches.first(where: { $0.isCurrent })?.name ?? branches.first?.name ?? ""
                 let commits = reference.isEmpty ? [] : try GitHistoryProvider.commits(repository: repository, reference: reference)
@@ -469,7 +472,7 @@ final class FolderComparisonModel: ObservableObject {
                     self.gitError = branches.isEmpty ? "仓库中没有可读取的本地分支或远程分支。" : nil
                     self.isLoadingGitHistory = false
                     self.status = commits.isEmpty
-                        ? "已找到 Git 仓库，但所选分支没有影响 Config/Datas 的提交。"
+                        ? "已找到 Git 仓库，但所选分支没有影响当前配置表目录的提交。"
                         : "已读取 \(commits.count) 条配置表历史提交。"
                 }
             } catch {
@@ -513,7 +516,7 @@ final class FolderComparisonModel: ObservableObject {
                     self.selectedGitCommitHash = commits.first?.hash ?? ""
                     self.isLoadingGitHistory = false
                     self.status = commits.isEmpty
-                        ? "所选分支没有影响 Config/Datas 的提交。"
+                        ? "所选分支没有影响当前配置表目录的提交。"
                         : "已读取 \(commits.count) 条配置表历史提交。"
                 }
             } catch {

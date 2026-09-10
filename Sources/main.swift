@@ -6,6 +6,8 @@ import SwiftUI
 
 struct ExportProject: Identifiable, Hashable {
     let rootURL: URL
+    let configurationRootURL: URL
+    let dataRootURL: URL
     let generatorURL: URL
     let displayPath: String
 
@@ -16,11 +18,15 @@ struct ExportProject: Identifiable, Hashable {
 
 struct CachedExportProject: Codable {
     let rootPath: String
+    let configurationRootPath: String?
+    let dataRootPath: String?
     let generatorPath: String
     let displayPath: String
 
     init(_ project: ExportProject) {
         rootPath = project.rootURL.path
+        configurationRootPath = project.configurationRootURL.path
+        dataRootPath = project.dataRootURL.path
         generatorPath = project.generatorURL.path
         displayPath = project.displayPath
     }
@@ -31,12 +37,28 @@ struct CachedExportProject: Codable {
         let manager = FileManager.default
         let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
         let generatorURL = URL(fileURLWithPath: generatorPath).standardizedFileURL
-        let lubanConfig = rootURL.appendingPathComponent("Config/luban.conf")
+        let discoveredLayout = ProjectConfigurationResolver.layout(for: generatorURL)
+        let configurationRoot = discoveredLayout?.configurationRootURL ?? configurationRootPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
+        } ?? generatorURL.deletingLastPathComponent().standardizedFileURL
+        let dataRoot = discoveredLayout?.dataRootURL ?? dataRootPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
+        } ?? configurationRoot.appendingPathComponent("Datas", isDirectory: true)
+        let lubanConfig = configurationRoot.appendingPathComponent("luban.conf", isDirectory: false)
+        var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: rootURL.path),
               manager.fileExists(atPath: generatorURL.path),
-              manager.fileExists(atPath: lubanConfig.path)
+              manager.fileExists(atPath: lubanConfig.path),
+              manager.fileExists(atPath: dataRoot.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
         else { return nil }
-        return ExportProject(rootURL: rootURL, generatorURL: generatorURL, displayPath: displayPath)
+        return ExportProject(
+            rootURL: rootURL,
+            configurationRootURL: configurationRoot,
+            dataRootURL: dataRoot,
+            generatorURL: generatorURL,
+            displayPath: displayPath
+        )
     }
 }
 
@@ -1461,7 +1483,7 @@ final class LanguageBrowserViewModel: ObservableObject {
 
     private func load(project: ExportProject) {
         let projectID = project.id
-        let languageFile = project.rootURL.appendingPathComponent("Config/Datas/TbLanguage.xlsx")
+        let languageFile = ProjectConfigurationResolver.languageWorkbookURL(in: project)
         isLoading = true
         errorMessage = nil
         actionMessage = nil
@@ -1474,14 +1496,21 @@ final class LanguageBrowserViewModel: ObservableObject {
         draftRevision &+= 1
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = Result { try LanguageWorkbookReader.read(fileURL: languageFile) }
+            let result: Result<LocalizationWorkbook, Error>
+            if let languageFile {
+                result = Result { try LanguageWorkbookReader.read(fileURL: languageFile) }
+            } else {
+                result = .failure(LanguageWorkbookReaderError(
+                    message: "在配置表目录中找不到主 TbLanguage.xlsx：\(project.dataRootURL.path)"
+                ))
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.selectedProjectID == projectID else { return }
                 self.isLoading = false
                 switch result {
                 case .success(let workbook):
                     self.workbook = workbook
-                    self.loadedFingerprint = try? GridWorkbookIO.fingerprint(languageFile)
+                    self.loadedFingerprint = try? GridWorkbookIO.fingerprint(workbook.fileURL)
                     self.restoreDrafts()
                     self.normalizeEntrySelection()
                 case .failure(let error):
@@ -1690,7 +1719,7 @@ struct CachedProjectTable: Codable {
 
     func restoreIfValid(projectsByID: [String: ExportProject]) -> ProjectTable? {
         guard let project = projectsByID[projectID] else { return nil }
-        let dataRoot = project.rootURL.appendingPathComponent("Config/Datas", isDirectory: true).standardizedFileURL
+        let dataRoot = project.dataRootURL
         let expectedURL = dataRoot.appendingPathComponent(relativeDataPath).standardizedFileURL
         let storedURL = URL(fileURLWithPath: filePath).standardizedFileURL
         guard expectedURL == storedURL,
@@ -1724,7 +1753,7 @@ enum ProjectTableScanner {
         let propertyKeys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey]
 
         for project in projects {
-            let dataRoot = project.rootURL.appendingPathComponent("Config/Datas", isDirectory: true).standardizedFileURL
+            let dataRoot = project.dataRootURL
             guard manager.fileExists(atPath: dataRoot.path) else { continue }
             guard let enumerator = manager.enumerator(
                 at: dataRoot,
@@ -2013,7 +2042,7 @@ final class ProjectTableBrowserViewModel: ObservableObject {
 
     private func refreshMetadata(for table: ProjectTable, available projects: [ExportProject]) {
         guard let project = projects.first(where: { $0.id == table.projectID }) else { return }
-        let dataRoot = project.rootURL.appendingPathComponent("Config/Datas", isDirectory: true).standardizedFileURL
+        let dataRoot = project.dataRootURL
         let refreshed = ProjectTableScanner.makeTable(
             fileURL: table.fileURL,
             project: project,
@@ -2064,8 +2093,11 @@ enum ExportState: Equatable {
 }
 
 final class ProjectScanner: @unchecked Sendable {
-    /// Projects are discovered from their actual Luban export entrypoint, instead
-    /// of assuming that a Unity root or repository name is the export directory.
+    /// Projects are discovered from a Luban export entrypoint and its
+    /// configuration, instead of assuming that a Unity root or repository name
+    /// is the export directory. This supports both the traditional
+    /// `Project/Config` layout and repositories such as TCR's
+    /// `trunk/LubanConfig` layout.
     func scan(root: URL) throws -> [ExportProject] {
         var found: [String: ExportProject] = [:]
         let manager = FileManager.default
@@ -2100,21 +2132,30 @@ final class ProjectScanner: @unchecked Sendable {
                 continue
             }
             guard values?.isRegularFile == true,
-                  itemURL.lastPathComponent == "gen.sh",
-                  itemURL.deletingLastPathComponent().lastPathComponent == "Config"
+                  itemURL.lastPathComponent.caseInsensitiveCompare("gen.sh") == .orderedSame,
+                  let layout = ProjectConfigurationResolver.layout(for: itemURL)
             else { continue }
 
-            let projectRoot = itemURL.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL
-            let lubanConfig = projectRoot.appendingPathComponent("Config/luban.conf")
-            // Guard against random helper scripts that happen to be named gen.sh.
-            guard manager.fileExists(atPath: lubanConfig.path) else { continue }
+            // A repository root is the most stable project identity for Git
+            // history and for nested layouts. Non-Git legacy projects fall back
+            // to the directory immediately above the configuration directory.
+            let projectRoot = ProjectConfigurationResolver.nearestRepositoryRoot(from: layout.configurationRootURL)
+                ?? layout.configurationRootURL.deletingLastPathComponent().standardizedFileURL
 
             let standardizedRoot = root.standardizedFileURL
-            let relative = projectRoot.path.hasPrefix(standardizedRoot.path)
-                ? String(projectRoot.path.dropFirst(standardizedRoot.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                : projectRoot.path
+            let rootComponents = standardizedRoot.pathComponents
+            let projectComponents = projectRoot.pathComponents
+            let relative: String
+            if projectComponents.count >= rootComponents.count,
+               Array(projectComponents.prefix(rootComponents.count)) == rootComponents {
+                relative = projectComponents.dropFirst(rootComponents.count).joined(separator: "/")
+            } else {
+                relative = projectRoot.path
+            }
             let project = ExportProject(
                 rootURL: projectRoot,
+                configurationRootURL: layout.configurationRootURL,
+                dataRootURL: layout.dataRootURL,
                 generatorURL: itemURL.standardizedFileURL,
                 displayPath: relative.isEmpty ? projectRoot.lastPathComponent : relative
             )
@@ -2208,9 +2249,13 @@ final class ExportViewModel: ObservableObject {
                     }
                     self.state = .ready
                     self.appendLog("[\(self.timestamp())] 扫描完成，找到 \(projects.count) 个可导表工程。\n")
-                    for project in projects { self.appendLog("  • \(project.displayPath)\n") }
+                    for project in projects {
+                        self.appendLog("  • \(project.displayPath)\n")
+                        self.appendLog("    配置目录：\(project.configurationRootURL.path)\n")
+                        self.appendLog("    数据目录：\(project.dataRootURL.path)\n")
+                    }
                     if projects.isEmpty {
-                        self.appendLog("  未找到 Config/gen.sh + Config/luban.conf；请确认扫描目录。\n")
+                        self.appendLog("  未找到包含 gen.sh 和 luban.conf 的配置工程；请确认扫描目录。\n")
                     }
                 }
             } catch {
@@ -2230,7 +2275,7 @@ final class ExportViewModel: ObservableObject {
         guard !isExporting else { return }
         let panel = NSOpenPanel()
         panel.title = "选择包含工程的 Project 目录"
-        panel.message = "工具会递归寻找各工程中的 Config/gen.sh"
+        panel.message = "工具会递归寻找 gen.sh，并根据同目录 luban.conf 的 dataDir 读取配置表"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -2263,8 +2308,9 @@ final class ExportViewModel: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [project.generatorURL.path]
-        // Every supported Config/gen.sh uses paths such as WORKSPACE=.. and
-        // CONF_ROOT=.; its contract is therefore to run from Config itself.
+        // Each project script is run from its own configuration directory. This
+        // preserves relative paths for both Config and nested layouts such as
+        // TCR/trunk/LubanConfig.
         process.currentDirectoryURL = project.workingDirectoryURL
 
         let standardOutput = Pipe()
@@ -2784,7 +2830,7 @@ struct ExportScreenView: View {
                     ContentUnavailableView(
                         "未找到可导表工程",
                         systemImage: "folder.badge.questionmark",
-                        description: Text("扫描范围内需存在 Config/gen.sh 与 Config/luban.conf")
+                        description: Text("扫描范围内需存在 gen.sh 与同目录 luban.conf，表目录由 dataDir 决定")
                     )
                     .padding()
                 }
@@ -2909,6 +2955,11 @@ struct LanguageReaderSmokeTest {
             catch { fputs("Git 历史回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
+        if paths.first == "--project-scan-smoke", paths.count == 2 {
+            do { try WorkspaceSmokeTests.projectDiscovery(paths[1]) }
+            catch { fputs("项目扫描回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
         if paths.first == "--workspace-smoke" {
             do { try WorkspaceSmokeTests.run(Array(paths.dropFirst())) }
             catch { fputs("工作区回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
@@ -2924,15 +2975,18 @@ struct LanguageReaderSmokeTest {
             Foundation.exit(64)
         }
         if paths.first == "--catalog" {
-            let projects = paths.dropFirst().map { rootPath in
-                let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
-                return ExportProject(
-                    rootURL: rootURL,
-                    generatorURL: rootURL.appendingPathComponent("Config/gen.sh"),
-                    displayPath: rootURL.lastPathComponent
-                )
-            }
             do {
+                let scanner = ProjectScanner()
+                var discovered: [String: ExportProject] = [:]
+                for rootPath in paths.dropFirst() {
+                    let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+                    for project in try scanner.scan(root: rootURL) {
+                        discovered[project.id] = project
+                    }
+                }
+                let projects = discovered.values.sorted {
+                    $0.displayPath.localizedStandardCompare($1.displayPath) == .orderedAscending
+                }
                 let tables = try ProjectTableScanner.scan(projects: projects)
                 print("配置表：\(tables.count)")
                 for table in tables where table.name == "TbLanguage.xlsx" {

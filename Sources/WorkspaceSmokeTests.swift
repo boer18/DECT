@@ -133,6 +133,52 @@ enum WorkspaceSmokeTests {
         print("Git 历史：仓库识别、分支、提交、临时快照、未提交工作区差异与清理通过。")
     }
 
+    @MainActor static func projectDiscovery(_ rootPath: String) throws {
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        let projects = try ProjectScanner().scan(root: root)
+        if let legacy = projects.first(where: { $0.rootURL.lastPathComponent == "sortime-game" }) {
+            try require(legacy.configurationRootURL.lastPathComponent == "Config" &&
+                        legacy.dataRootURL.path.hasSuffix("/Config/Datas"),
+                        "传统 Config/Datas 工程兼容识别错误")
+        }
+        guard let project = projects.first(where: { $0.rootURL.lastPathComponent == "TCR" }) else {
+            throw WorkspaceError(message: "项目扫描未找到 TCR 配置工程。")
+        }
+        try require(project.configurationRootURL.lastPathComponent == "LubanConfig",
+                    "TCR 配置根目录识别错误：\(project.configurationRootURL.path)")
+        try require(project.dataRootURL.lastPathComponent == "Datas" &&
+                    project.dataRootURL.path.hasSuffix("/trunk/LubanConfig/Datas"),
+                    "TCR dataDir 解析错误：\(project.dataRootURL.path)")
+        try require(project.generatorURL.lastPathComponent == "gen.sh" &&
+                    project.workingDirectoryURL == project.configurationRootURL,
+                    "TCR 导表脚本或执行目录识别错误")
+
+        let tables = try ProjectTableScanner.scan(projects: [project])
+        try require(tables.count >= 80, "TCR 配置表递归扫描数量异常：\(tables.count)")
+        try require(tables.contains(where: { $0.relativeDataPath == "TbLanguage.xlsx" }),
+                    "TCR 主 TbLanguage.xlsx 未扫描到")
+        try require(tables.contains(where: { $0.relativeDataPath.hasPrefix("V2.0/") }) &&
+                    tables.contains(where: { $0.relativeDataPath.hasPrefix("V3.0/") }) &&
+                    tables.contains(where: { $0.relativeDataPath.contains("水上狂欢/") }),
+                    "TCR 二级和中文目录表格未完整扫描")
+
+        guard let languageURL = ProjectConfigurationResolver.languageWorkbookURL(in: project) else {
+            throw WorkspaceError(message: "TCR 主 TbLanguage.xlsx 定位失败。")
+        }
+        let language = try LanguageWorkbookReader.read(fileURL: languageURL)
+        try require(!language.entries.isEmpty && language.languageColumns.count >= 2,
+                    "TCR 主 TbLanguage.xlsx 读取结果为空")
+
+        let repository = try GitHistoryProvider.discover(
+            projectURL: project.rootURL,
+            dataRootURL: project.dataRootURL
+        )
+        try require(repository.dataRelativePath == "trunk/LubanConfig/Datas" &&
+                    repository.currentDataRoot == project.dataRootURL,
+                    "TCR Git 历史配置表路径识别错误：\(repository.dataRelativePath)")
+        print("TCR 通用工程扫描：配置根目录、dataDir、80 张表、V2/V3/中文子目录、主语言表和 Git 数据路径通过；源表未改。")
+    }
+
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw WorkspaceError(message: message) }
     }

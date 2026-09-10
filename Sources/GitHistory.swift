@@ -35,11 +35,12 @@ struct GitCommit: Identifiable, Hashable {
 struct GitRepositoryInfo: Hashable {
     let repositoryRoot: URL
     let projectRoot: URL
+    let dataRoot: URL
     let dataRelativePath: String
     let currentBranch: String?
 
     var currentDataRoot: URL {
-        projectRoot.appendingPathComponent("Config/Datas", isDirectory: true).standardizedFileURL
+        dataRoot
     }
 }
 
@@ -60,7 +61,7 @@ enum GitHistoryProvider {
     private static let fieldSeparator: Character = "\u{1F}"
     private static let branchFieldSeparator: Character = "\t"
 
-    static func discover(projectURL: URL) throws -> GitRepositoryInfo {
+    static func discover(projectURL: URL, dataRootURL: URL? = nil) throws -> GitRepositoryInfo {
         let projectRoot = projectURL.resolvingSymlinksInPath().standardizedFileURL
         let repositoryPath = try output([
             "-C", projectRoot.path,
@@ -72,14 +73,16 @@ enum GitHistoryProvider {
 
         let repositoryRoot = URL(fileURLWithPath: repositoryPath, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
-        guard let relativeProjectPath = relativePath(from: repositoryRoot, to: projectRoot) else {
+        guard relativePath(from: repositoryRoot, to: projectRoot) != nil else {
             throw GitHistoryError(message: "Git 仓库根目录与当前项目路径不一致。")
         }
-        let dataRelativePath = [relativeProjectPath, "Config", "Datas"]
-            .filter { !$0.isEmpty }
-            .joined(separator: "/")
-        guard FileManager.default.fileExists(atPath: projectRoot.appendingPathComponent("Config/Datas").path) else {
-            throw GitHistoryError(message: "当前项目没有 Config/Datas 配置表目录。")
+        let dataRoot = (dataRootURL ?? projectRoot.appendingPathComponent("Config/Datas", isDirectory: true))
+            .resolvingSymlinksInPath().standardizedFileURL
+        guard let dataRelativePath = relativePath(from: repositoryRoot, to: dataRoot) else {
+            throw GitHistoryError(message: "配置表目录不在 Git 仓库内，无法读取 Git 历史。")
+        }
+        guard FileManager.default.fileExists(atPath: dataRoot.path) else {
+            throw GitHistoryError(message: "当前项目没有可用的配置表目录：\(dataRoot.path)")
         }
 
         let branchOutput = try? output([
@@ -90,6 +93,7 @@ enum GitHistoryProvider {
         return GitRepositoryInfo(
             repositoryRoot: repositoryRoot,
             projectRoot: projectRoot,
+            dataRoot: dataRoot,
             dataRelativePath: dataRelativePath,
             currentBranch: currentBranch
         )
