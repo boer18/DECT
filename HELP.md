@@ -2,14 +2,14 @@
 
 这是一份面向策划和配置表使用者的快速手册。应用内可以从 macOS 顶部菜单栏的“帮助”打开同样的内容。
 
-当前版本 1.8.11 支持 tapcoloroasis 及同类旧版 Luban 工程；导表时会自动识别项目的 .NET Runtime 要求并进行进程级兼容处理。
+当前版本 1.8.12 支持 tapcoloroasis 及同类旧版 Luban 工程；导表时会自动选择项目工作流脚本并识别项目的 .NET Runtime 要求，进行进程级兼容处理。更新后首次启动会显示本次版本的功能与 Bug 说明。
 
 ## 1. 开始使用
 
 第一次打开工具时，点击顶部“选择 Project 目录”，选择包含一个或多个工程的目录。工具会递归寻找包含以下文件的配置入口：
 
 ```text
-gen.sh
+gen.sh、gen_plus.sh 或 gen_for_command.sh
 luban.conf
 ```
 
@@ -41,7 +41,7 @@ tapcoloroasis 这类工程可以是：
 <项目目录>/ColorOasis/Assets/BundleRes/Config/game/
 ```
 
-工具会把最近的 `.git` 根目录作为项目身份，把 `gen.sh` 所在目录作为配置根目录，把 `dataDir` 解析出的目录作为配置表数据根目录。因此配置目录不必固定命名为 `Config`。
+工具会把最近的 `.git` 根目录作为项目身份，把选中的配置脚本所在目录作为配置根目录，把 `dataDir` 解析出的目录作为配置表数据根目录。同一工程同时存在多个脚本时优先选择 `gen_plus.sh`，因此配置目录不必固定命名为 `Config`。
 
 项目列表会保存到本机。重新打开工具时会优先读取缓存，新增、删除或移动工程后点击“重新扫描工程”。
 
@@ -59,7 +59,7 @@ tapcoloroasis 这类工程可以是：
 ### 编辑单元格
 
 - 单击单元格后直接输入，会替换原内容；连续输入文字、数字或中文会继续追加。
-- 双击单元格进入带光标的编辑状态，按 Enter 提交。
+- 双击单元格进入带光标的编辑状态，按 Enter 提交；按 Shift + Enter 在当前光标处插入换行并继续编辑。
 - 公式单元格未选中时显示工作簿保存的计算结果，选中后显示原始公式，可以直接修改。
 - 工具不提供公式计算引擎。修改公式后，需要由支持该公式的表格应用重新计算。
 
@@ -149,11 +149,11 @@ Git 历史模式会跟随顶部当前项目读取本地 `.git`、分支和配置
 
 ## 7. 一键导表
 
-选择项目后点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存，再运行对应配置目录中的 `gen.sh`。
+选择项目后点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存，再运行该项目的配置脚本；tapcoloroasis 会优先运行 Unity 编辑器菜单使用的 `gen_plus.sh`，保持 JSON 产物格式。
 
 对于 tapcoloroasis 这类 `Luban.runtimeconfig.json` 请求 net7.0 的项目，工具会读取该文件，并仅为本次导表进程设置 `DOTNET_ROLL_FORWARD=Major`，使其可以在已安装 .NET 8 或更新版本的 Mac 上运行。已经使用 net8.0 或更新版本的旧项目不会设置这个覆盖项；工程脚本、源表目录和导出目录都不会被工具改写。
 
-tapcoloroasis 的 `gen.sh` 会按工程原规则生成 JSON、`.bytes` 和 C# 代码：源表来自 `Config/Datas`，产物分别位于 `ColorOasis/Assets/TempConfigJson`、`ColorOasis/Assets/BundleRes/Config/game` 和 `ColorOasis/Assets/Scripts/Game/Main/GameConfig`。
+tapcoloroasis 的 `gen.sh` 是二进制生成流程，误执行会把已提交的 JSON 替换成 `.bytes` 并改写整批生成 C#；工具会选择该项目实际使用的 `gen_plus.sh`，避免这类整库格式切换。
 
 日志会显示：
 
@@ -184,7 +184,7 @@ macOS 顶部菜单栏中的“表格工具”菜单提供：
 
 ### 找不到工程
 
-确认选择的是包含工程的 Project 根目录，而不是某个工程内部的 `Config` 或 `LubanConfig` 目录。工程需要有 `gen.sh`、同目录 `luban.conf`，并且 `dataDir` 指向实际存在的目录。
+确认选择的是包含工程的 Project 根目录，而不是某个工程内部的 `Config` 或 `LubanConfig` 目录。工程需要有 `gen.sh`、`gen_plus.sh` 或 `gen_for_command.sh` 中至少一个，同目录有 `luban.conf`，并且 `dataDir` 指向实际存在的目录。
 
 ### 找不到多语言表
 

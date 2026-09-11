@@ -29,6 +29,40 @@ struct LubanRuntimeInfo: Hashable {
 }
 
 enum ProjectConfigurationResolver {
+    /// Supported Luban entrypoints, ordered from the most project-specific
+    /// export command to the legacy default. Some projects keep `gen.sh` for
+    /// a binary/runtime build while their Unity editor menu invokes
+    /// `gen_plus.sh` for the checked-in JSON configuration. Choosing the
+    /// canonical entrypoint prevents an export from changing the repository's
+    /// entire generated-data format.
+    static let supportedGeneratorNames = ["gen_plus.sh", "gen_for_command.sh", "gen.sh"]
+
+    static func isSupportedGeneratorName(_ name: String) -> Bool {
+        supportedGeneratorNames.contains {
+            $0.caseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    static func shouldPreferGenerator(_ candidate: URL, over current: URL) -> Bool {
+        let candidateName = candidate.lastPathComponent.lowercased()
+        let currentName = current.lastPathComponent.lowercased()
+        let candidatePriority = supportedGeneratorNames.firstIndex(of: candidateName) ?? Int.max
+        let currentPriority = supportedGeneratorNames.firstIndex(of: currentName) ?? Int.max
+        if candidatePriority != currentPriority { return candidatePriority < currentPriority }
+        return candidate.path.localizedStandardCompare(current.path) == .orderedAscending
+    }
+
+    static func preferredGeneratorURL(in configurationRoot: URL) -> URL? {
+        let manager = FileManager.default
+        for name in supportedGeneratorNames {
+            let candidate = configurationRoot.appendingPathComponent(name, isDirectory: false).standardizedFileURL
+            if manager.isReadableFile(atPath: candidate.path), layout(for: candidate) != nil {
+                return candidate
+            }
+        }
+        return nil
+    }
+
     static func layout(for generatorURL: URL) -> LubanProjectLayout? {
         let generator = generatorURL.standardizedFileURL
         let configurationRoot = generator.deletingLastPathComponent().standardizedFileURL

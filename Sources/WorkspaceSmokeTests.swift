@@ -148,9 +148,9 @@ enum WorkspaceSmokeTests {
             try require(tapcolor.configurationRootURL.lastPathComponent == "Config" &&
                         tapcolor.dataRootURL.path.hasSuffix("/tapcoloroasis/Config/Datas"),
                         "tapcoloroasis Config/Datas 工程兼容识别错误")
-            try require(tapcolor.generatorURL.lastPathComponent == "gen.sh" &&
+            try require(tapcolor.generatorURL.lastPathComponent == "gen_plus.sh" &&
                         tapcolor.workingDirectoryURL == tapcolor.configurationRootURL,
-                        "tapcoloroasis 导表脚本或执行目录识别错误")
+                        "tapcoloroasis 应选择 Unity 实际使用的 gen_plus.sh 导表脚本")
             guard let runtime = ProjectConfigurationResolver.lubanRuntimeInfo(for: tapcolor.generatorURL) else {
                 throw WorkspaceError(message: "tapcoloroasis Luban runtimeconfig 未识别。")
             }
@@ -306,6 +306,21 @@ enum WorkspaceSmokeTests {
         let root = manager.temporaryDirectory.appendingPathComponent("TableWorkspace-smoke-\(UUID().uuidString)")
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? manager.removeItem(at: root) }
+        guard let shiftReturn = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                                  modifierFlags: [.shift], timestamp: 0,
+                                                  windowNumber: 0, context: nil,
+                                                  characters: "\r", charactersIgnoringModifiers: "\r",
+                                                  isARepeat: false, keyCode: 36),
+              let commandShiftReturn = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                                         modifierFlags: [.command, .shift], timestamp: 0,
+                                                         windowNumber: 0, context: nil,
+                                                         characters: "\r", charactersIgnoringModifiers: "\r",
+                                                         isARepeat: false, keyCode: 36)
+        else { throw WorkspaceError(message: "无法创建 Shift+Enter 回归事件") }
+        try require(!GridCellEditingSupport.shouldInsertLineBreak(for: commandShiftReturn, hasMarkedText: false) &&
+                    !GridCellEditingSupport.shouldInsertLineBreak(for: shiftReturn, hasMarkedText: true),
+                    "Shift+Enter 错误打断命令键或输入法组合")
+        print("单元格编辑：Shift+Enter 策略、命令键保护和输入法组合保护通过")
         let special = [["<color=#abcdef>中文 & {0}</color>", "line\nnext", "tab\there"], ["\"quoted\"", "00123", "=literal"]]
         try require(GridClipboard.decode(GridClipboard.encode(special)) == special, "跨行/Tab/引号剪贴板往返失败")
         try require(GridClipboard.decode("a\tb\r\nc\td\r\n") == [["a", "b"], ["c", "d"]], "Excel CRLF 剪贴板失败")
@@ -940,7 +955,21 @@ enum WorkspaceSmokeTests {
             tableView.mouseDown(with: click)
             grid.update()
             try require(tableView.editedRow == 5 && tableView.currentEditor() != nil, "双击后刷新销毁了单元格编辑器")
-            tableView.currentEditor()?.string = "double-click edited"
+            guard let activeEditor = tableView.currentEditor() as? NSTextView,
+                  let shiftReturn = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                                     modifierFlags: [.shift], timestamp: 0,
+                                                     windowNumber: testWindow.windowNumber, context: nil,
+                                                     characters: "\r", charactersIgnoringModifiers: "\r",
+                                                     isARepeat: false, keyCode: 36) else {
+                throw WorkspaceError(message: "双击编辑没有返回文本字段编辑器")
+            }
+            activeEditor.string = "第一行"
+            activeEditor.setSelectedRange(NSRange(location: activeEditor.string.utf16.count, length: 0))
+            testWindow.makeFirstResponder(activeEditor)
+            NSApp.sendEvent(shiftReturn)
+            try require(activeEditor.string == "第一行\n" && tableView.currentEditor() != nil,
+                        "双击编辑时 Shift+Enter 未插入换行或提前提交")
+            activeEditor.string = "double-click edited"
             testWindow.makeFirstResponder(nil)
             try require(editor.inputText(GridAddress(row: 5, column: 1)) == "double-click edited", "单元格编辑提交失败")
             editor.setZoom(1.5); grid.update()

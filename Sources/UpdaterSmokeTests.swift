@@ -3,6 +3,18 @@ import AppKit
 
 enum UpdaterSmokeTests {
     @MainActor static func run() throws {
+        let releaseURL = URL(string: "https://github.com/boer18/DECT/releases/tag/v1.8.12")!
+        let releases = [
+            PublishedRelease(tag_name: "v1.8.12", body: "## 功能与修复\n- Shift + Enter 插入换行\n- 修复 tapcoloroasis 导表模式\n", html_url: releaseURL, assets: [], prerelease: false, draft: false),
+            PublishedRelease(tag_name: "v1.8.11", body: "- 不应出现在范围内\n", html_url: releaseURL, assets: [], prerelease: false, draft: false),
+            PublishedRelease(tag_name: "v1.8.13", body: "- 未来版本\n", html_url: releaseURL, assets: [], prerelease: false, draft: false),
+            PublishedRelease(tag_name: "v1.8.12-beta", body: "- 预发布\n", html_url: releaseURL, assets: [], prerelease: true, draft: false)
+        ]
+        let notes = AppUpdater.releaseNoteSections(from: "1.8.11", through: "1.8.12", releases: releases)
+        try WorkspaceSmokeTests.require(notes.count == 1 && notes[0].version == "1.8.12" &&
+                                         notes[0].items == ["Shift + Enter 插入换行", "修复 tapcoloroasis 导表模式"],
+                                         "更新说明版本范围、预发布过滤或 Markdown 列表解析失败")
+
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("DECT-Update-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)

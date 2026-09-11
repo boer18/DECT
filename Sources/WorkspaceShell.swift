@@ -462,6 +462,10 @@ struct WorkspaceRootView: View {
         .frame(minWidth: 1120, minHeight: 700)
         .background(WorkspaceCloseBehavior())
         .sheet(isPresented: $updater.showsPanel) { AppUpdatePanel(updater: updater).interactiveDismissDisabled(updater.busy) }
+        .sheet(isPresented: $updater.showsReleaseNotes,
+               onDismiss: { updater.dismissReleaseNotes() }) {
+            AppReleaseNotesPanel(updater: updater)
+        }
         .sheet(isPresented: $language.showsTranslationSettings) {
             TranslationSettingsView(onSaved: { })
         }

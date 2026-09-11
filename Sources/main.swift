@@ -35,11 +35,17 @@ struct CachedExportProject: Codable {
     func restoreIfValid() -> ExportProject? {
         let manager = FileManager.default
         let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
-        let generatorURL = URL(fileURLWithPath: generatorPath).standardizedFileURL
-        let discoveredLayout = ProjectConfigurationResolver.layout(for: generatorURL)
-        let configurationRoot = discoveredLayout?.configurationRootURL ?? configurationRootPath.map {
+        let cachedGeneratorURL = URL(fileURLWithPath: generatorPath).standardizedFileURL
+        let cachedLayout = ProjectConfigurationResolver.layout(for: cachedGeneratorURL)
+        let configurationRoot = cachedLayout?.configurationRootURL ?? configurationRootPath.map {
             URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
-        } ?? generatorURL.deletingLastPathComponent().standardizedFileURL
+        } ?? cachedGeneratorURL.deletingLastPathComponent().standardizedFileURL
+        // A cache written by 1.8.11 may still point to tapcoloroasis/gen.sh.
+        // Re-resolve the preferred sibling entrypoint so a normal restart is
+        // enough to pick gen_plus.sh; the user does not have to rescan first.
+        let generatorURL = ProjectConfigurationResolver.preferredGeneratorURL(in: configurationRoot)
+            ?? cachedGeneratorURL
+        let discoveredLayout = ProjectConfigurationResolver.layout(for: generatorURL)
         let dataRoot = discoveredLayout?.dataRootURL ?? dataRootPath.map {
             URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
         } ?? configurationRoot.appendingPathComponent("Datas", isDirectory: true)
@@ -2085,7 +2091,9 @@ final class ProjectScanner: @unchecked Sendable {
     /// configuration, instead of assuming that a Unity root or repository name
     /// is the export directory. This supports both the traditional
     /// `Project/Config` layout and repositories such as TCR's
-    /// `trunk/LubanConfig` layout.
+    /// `trunk/LubanConfig` layout. When a project has multiple Luban scripts,
+    /// the script used by the project-specific workflow (`gen_plus.sh`, then
+    /// `gen_for_command.sh`, then legacy `gen.sh`) wins deterministically.
     func scan(root: URL) throws -> [ExportProject] {
         var found: [String: ExportProject] = [:]
         let manager = FileManager.default
@@ -2120,7 +2128,7 @@ final class ProjectScanner: @unchecked Sendable {
                 continue
             }
             guard values?.isRegularFile == true,
-                  itemURL.lastPathComponent.caseInsensitiveCompare("gen.sh") == .orderedSame,
+                  ProjectConfigurationResolver.isSupportedGeneratorName(itemURL.lastPathComponent),
                   let layout = ProjectConfigurationResolver.layout(for: itemURL)
             else { continue }
 
@@ -2147,7 +2155,14 @@ final class ProjectScanner: @unchecked Sendable {
                 generatorURL: itemURL.standardizedFileURL,
                 displayPath: relative.isEmpty ? projectRoot.lastPathComponent : relative
             )
-            found[project.id] = project
+            if let existing = found[project.id] {
+                if ProjectConfigurationResolver.shouldPreferGenerator(project.generatorURL,
+                                                                       over: existing.generatorURL) {
+                    found[project.id] = project
+                }
+            } else {
+                found[project.id] = project
+            }
         }
 
         return found.values.sorted {

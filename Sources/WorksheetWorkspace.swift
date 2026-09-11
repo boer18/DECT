@@ -1584,6 +1584,22 @@ private func popUpGridInsertMenu(at point: NSPoint, in view: NSView,
     menu.popUp(positioning: nil, at: point, in: view)
 }
 
+/// The default NSTextField field editor treats Return as “finish editing”.
+/// A spreadsheet cell also needs a way to insert a line break without leaving
+/// that editing session. This shared policy is used by the field-editor event
+/// monitor, while the actual editor remains AppKit's normal NSTextView so
+/// Chinese and other IMEs keep their native marked-text pipeline.
+enum GridCellEditingSupport {
+    static func shouldInsertLineBreak(for event: NSEvent, hasMarkedText: Bool) -> Bool {
+        let blocked: NSEvent.ModifierFlags = [.command, .control, .option]
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        return isReturn
+            && event.modifierFlags.contains(.shift)
+            && event.modifierFlags.intersection(blocked).isEmpty
+            && !hasMarkedText
+    }
+}
+
 final class CellGridTable: NSTableView, NSTextInputClient {
     weak var editor: GridEditorModel?
     var rowOffset = 0
@@ -1595,6 +1611,34 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     private var markedAddress: GridAddress?
     private var markedBase = ""
     private var handledTextInputEvent = false
+    private var lineBreakMonitor: Any?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installLineBreakMonitor()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installLineBreakMonitor()
+    }
+
+    deinit {
+        if let lineBreakMonitor { NSEvent.removeMonitor(lineBreakMonitor) }
+    }
+
+    private func installLineBreakMonitor() {
+        lineBreakMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  self.editedRow >= 0,
+                  let fieldEditor = self.window?.firstResponder as? NSTextView,
+                  fieldEditor.isFieldEditor,
+                  GridCellEditingSupport.shouldInsertLineBreak(for: event, hasMarkedText: fieldEditor.hasMarkedText())
+            else { return event }
+            fieldEditor.insertText("\n", replacementRange: fieldEditor.selectedRange())
+            return nil
+        }
+    }
 
     func endDirectTyping() {
         directTypingAddress = nil
@@ -1606,6 +1650,26 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         let value = directTypingAddress == address ? editor.inputText(address) + typed : typed
         editor.edit([address: value])
         directTypingAddress = address
+    }
+
+    private func beginLineBreakEditing(editor: GridEditorModel) {
+        let row = editor.extent.row
+        let column = editor.extent.column
+        let localColumn = tableColumns.firstIndex { $0.identifier.rawValue == String(column) }
+        guard let localColumn,
+              row >= rowOffset,
+              row - rowOffset < numberOfRows else { return }
+        endDirectTyping()
+        editColumn(localColumn, row: row - rowOffset, with: nil, select: false)
+        // AppKit installs the field editor during editColumn. The next run
+        // loop is the first point at which it is safe to insert the requested
+        // newline while keeping the editor active.
+        DispatchQueue.main.async { [weak self] in
+            guard let fieldEditor = self?.window?.firstResponder as? NSTextView,
+                  fieldEditor.isFieldEditor,
+                  !fieldEditor.hasMarkedText() else { return }
+            fieldEditor.insertText("\n", replacementRange: fieldEditor.selectedRange())
+        }
     }
 
     private func inputString(_ value: Any) -> String {
@@ -1927,7 +1991,11 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         case 125: row += 1
         case 126: row -= 1
         case 51, 117: endDirectTyping(); editor.clearSelection(); return
-        case 36:
+        case 36, 76:
+            if event.modifierFlags.contains(.shift) {
+                beginLineBreakEditing(editor: editor)
+                return
+            }
             endDirectTyping()
             let local = tableColumns.firstIndex { $0.identifier.rawValue == String(column) }
             if let local, row >= rowOffset, row - rowOffset < numberOfRows { editColumn(local, row: row - rowOffset, with: event, select: true) }

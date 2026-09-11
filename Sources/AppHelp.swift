@@ -29,7 +29,7 @@ enum AppHelpContent {
             icon: "sparkles",
             summary: "表格工具把多个 Unity/Luban 工程的配置表、导表和版本检查集中在一个 macOS 工作区中。",
             blocks: [
-                AppHelpBlock("第一次使用", text: "打开工具后，点击顶部“选择 Project 目录”，选择包含一个或多个工程的目录。工具会递归寻找 gen.sh，并检查它所在目录是否有 luban.conf。表格目录由 luban.conf 里的 dataDir 决定。"),
+                AppHelpBlock("第一次使用", text: "打开工具后，点击顶部“选择 Project 目录”，选择包含一个或多个工程的目录。工具会递归寻找 gen.sh、gen_plus.sh 或 gen_for_command.sh，并检查它所在目录是否有 luban.conf。表格目录由 luban.conf 里的 dataDir 决定。"),
                 AppHelpBlock("项目结构示例", text: "传统工程：\n<项目目录>/Config/gen.sh\n<项目目录>/Config/luban.conf\n<项目目录>/Config/Datas/\n\n嵌套工程：\n<仓库>/trunk/LubanConfig/gen.sh\n<仓库>/trunk/LubanConfig/luban.conf\n<仓库>/trunk/LubanConfig/Datas/"),
                 AppHelpBlock("项目 Tab", bullets: [
                     "顶部项目 Tab 用来切换当前工程，配置表、多语言和导表日志会跟随当前项目。",
@@ -65,7 +65,7 @@ enum AppHelpContent {
             blocks: [
                 AppHelpBlock("编辑单元格", bullets: [
                     "单击单元格后直接输入，会替换原内容；连续输入文字、数字或中文时会继续追加。",
-                    "双击单元格进入带光标的编辑状态，按 Enter 提交。",
+                    "双击单元格进入带光标的编辑状态，按 Enter 提交；按 Shift + Enter 在光标处插入换行并继续编辑。",
                     "公式单元格未选中时显示计算结果，选中后顶部内容栏和当前单元格显示原始公式，可以直接修改。工具本身不负责重新计算公式。"
                 ]),
                 AppHelpBlock("复制内容", bullets: [
@@ -142,7 +142,7 @@ enum AppHelpContent {
             icon: "play.circle",
             summary: "直接调用工程自己的导表脚本，不需要先打开 Unity；脚本输出和错误会实时显示。",
             blocks: [
-                AppHelpBlock("开始导表", text: "选择顶部项目 Tab 后，点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存对应内容，再运行配置目录中的 gen.sh。"),
+                AppHelpBlock("开始导表", text: "选择顶部项目 Tab 后，点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存对应内容，再运行项目自己的配置脚本。普通工程使用 gen.sh；tapcoloroasis 这类同时提供 gen_plus.sh 的工程会优先使用 gen_plus.sh，保持 JSON 配置格式。"),
                 AppHelpBlock("日志内容", bullets: [
                     "工程目录、配置目录、数据目录、脚本路径和执行目录。",
                     "检测到的 Luban Runtime；对于 net7.0 等旧版 Luban，必要时会显示本次导表启用的 .NET 兼容模式。",
@@ -164,6 +164,7 @@ enum AppHelpContent {
                     "系统“设置表格工具…”入口提供翻译 API 设置，适合不打开多语言页签时修改 Key。"
                 ]),
                 AppHelpBlock("自动更新", text: "工具会在启动时和运行期间定期检查 GitHub 正式 Release。发现新版本后会显示版本号、Build 和更新说明，并在确认没有未保存内容或运行中任务时提供“安装并重启”。"),
+                AppHelpBlock("更新后说明", text: "安装并重启后，工具会按旧版本到当前版本的范围读取所有正式 Release，把每个版本的功能新增和 Bug 修复整理成逐条说明并弹出一次。关闭后仍可从“版本与更新说明”打开本次条目。"),
                 AppHelpBlock("当前版本", text: "当前版本号和 Build 可以在“版本与更新说明”窗口中查看。更新包来自项目的 GitHub Releases，安装前会校验 ZIP、应用标识、版本和签名。")
             ]
         ),
