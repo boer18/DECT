@@ -9,9 +9,11 @@ struct ExportProject: Identifiable, Hashable {
     let dataRootURL: URL
     let generatorURL: URL
     let displayPath: String
+    var remarkName: String? = nil
 
     var id: String { rootURL.standardizedFileURL.path }
-    var name: String { rootURL.lastPathComponent }
+    var originalName: String { rootURL.lastPathComponent }
+    var name: String { remarkName ?? originalName }
     var workingDirectoryURL: URL { generatorURL.deletingLastPathComponent().standardizedFileURL }
 }
 
@@ -2173,6 +2175,7 @@ final class ProjectScanner: @unchecked Sendable {
 
 @MainActor
 final class ExportViewModel: ObservableObject {
+    @Published var showsProjectManagement = false
     @Published var followsOutput = true
     @Published private(set) var projects: [ExportProject] = []
     @Published var selectedID: ExportProject.ID? {
@@ -2192,6 +2195,7 @@ final class ExportViewModel: ObservableObject {
     @Published private(set) var usingCachedProjectList = false
 
     private let scanner = ProjectScanner()
+    private var presentation = ProjectPresentationPreferences.load()
     private static let selectedProjectDefaultsKey = "lastSelectedProjectRoot"
     private static let projectListCacheDefaultsKey = "projectListCache"
     private var activeProcess: Process?
@@ -2244,11 +2248,11 @@ final class ExportViewModel: ObservableObject {
                 let projects = try scanner.scan(root: root)
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.projects = projects
+                    self.projects = self.presentation.apply(to: projects)
                     self.hasScanned = true
                     self.saveProjectListCache(projects)
                     if !projects.contains(where: { $0.id == self.selectedID }) {
-                        self.selectedID = projects.first?.id
+                        self.selectedID = self.projects.first?.id
                     }
                     self.state = .ready
                     self.appendLog("[\(self.timestamp())] 扫描完成，找到 \(projects.count) 个可导表工程。\n")
@@ -2408,9 +2412,7 @@ final class ExportViewModel: ObservableObject {
               cache.scanRootPath == scanRoot.standardizedFileURL.path
         else { return }
 
-        let validProjects = cache.projects.compactMap { $0.restoreIfValid() }.sorted {
-            $0.displayPath.localizedStandardCompare($1.displayPath) == .orderedAscending
-        }
+        let validProjects = presentation.apply(to: cache.projects.compactMap { $0.restoreIfValid() })
         guard !validProjects.isEmpty else { return }
 
         projects = validProjects
@@ -2429,6 +2431,22 @@ final class ExportViewModel: ObservableObject {
         )
         guard let data = try? JSONEncoder().encode(cache) else { return }
         UserDefaults.standard.set(data, forKey: Self.projectListCacheDefaultsKey)
+    }
+
+    func updateProjectPresentation(_ orderedProjects: [ExportProject]) {
+        guard Set(orderedProjects.map(\.id)) == Set(projects.map(\.id)),
+              orderedProjects.count == projects.count else { return }
+        presentation.update(from: orderedProjects)
+        presentation.save()
+        projects = presentation.apply(to: projects)
+    }
+
+    func moveProject(_ id: String, by offset: Int) {
+        guard let index = projects.firstIndex(where: { $0.id == id }),
+              projects.indices.contains(index + offset) else { return }
+        var reordered = projects
+        reordered.swapAt(index, index + offset)
+        updateProjectPresentation(reordered)
     }
 
     private func appendLog(_ text: String) { log += text }
@@ -2930,6 +2948,9 @@ struct OneClickTableExportApp: App {
                     Button("重新扫描工程") {
                         menuRouter.pendingAction = .rescanProjects
                     }
+                    Button("管理项目…") {
+                        menuRouter.pendingAction = .manageProjects
+                    }
                     Divider()
                     Button("翻译 API 设置…") {
                         menuRouter.pendingAction = .translationSettings
@@ -2964,6 +2985,11 @@ struct OneClickTableExportApp: App {
 struct LanguageReaderSmokeTest {
     @MainActor static func main() {
         let paths = Array(CommandLine.arguments.dropFirst())
+        if paths.first == "--project-presentation-smoke" {
+            do { try ProjectPresentationSmokeTests.run() }
+            catch { fputs("项目显示设置回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
         if paths.first == "--close-smoke" {
             let app = NSApplication.shared
             let delegate = WorkspaceApplicationDelegate()

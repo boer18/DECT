@@ -5,6 +5,7 @@ import SwiftUI
 enum WorkspaceMenuAction: Equatable {
     case chooseScanRoot
     case rescanProjects
+    case manageProjects
     case translationSettings
     case updateNotes
     case checkForUpdates
@@ -402,6 +403,7 @@ struct WorkspaceRootView: View {
                 Menu {
                     Button("选择 Project 目录…") { exporter.chooseScanRoot() }
                     Button("重新扫描工程") { exporter.scan() }
+                    Button("管理项目…") { exporter.showsProjectManagement = true }.disabled(exporter.projects.isEmpty)
                     Button("翻译 API 设置…") { language.showsTranslationSettings = true }
                     Divider()
                     Text("版本 \(AppUpdater.currentVersion)")
@@ -424,11 +426,22 @@ struct WorkspaceRootView: View {
                                     Text(project.name).font(.system(size: 12, weight: project.id == exporter.selectedID ? .semibold : .regular))
                                 }.padding(.horizontal, 12).padding(.vertical, 8)
                                     .background(project.id == exporter.selectedID ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                            }.buttonStyle(.plain).help(project.rootURL.path)
+                            }.buttonStyle(.plain).help("\(project.originalName)\n\(project.rootURL.path)")
+                                .contextMenu {
+                                    Button("设置备注名 / 管理项目…") { exporter.showsProjectManagement = true }
+                                    Divider()
+                                    Button("向前移动") { exporter.moveProject(project.id, by: -1) }
+                                        .disabled(exporter.projects.first?.id == project.id)
+                                    Button("向后移动") { exporter.moveProject(project.id, by: 1) }
+                                        .disabled(exporter.projects.last?.id == project.id)
+                                }
                         }
                     }
                 }
                 .disabled(exporter.isExporting || language.isBusy)
+                Button { exporter.showsProjectManagement = true } label: { Image(systemName: "slider.horizontal.3") }
+                    .help("管理项目顺序与备注名")
+                    .disabled(exporter.projects.isEmpty || exporter.isExporting || language.isBusy)
                 if let project = exporter.selectedProject {
                     Button { NSWorkspace.shared.activateFileViewerSelecting([project.rootURL]) } label: { Image(systemName: "folder") }.help("打开当前项目")
                 }
@@ -462,6 +475,7 @@ struct WorkspaceRootView: View {
         .frame(minWidth: 1120, minHeight: 700)
         .background(WorkspaceCloseBehavior())
         .sheet(isPresented: $updater.showsPanel) { AppUpdatePanel(updater: updater).interactiveDismissDisabled(updater.busy) }
+        .sheet(isPresented: $exporter.showsProjectManagement) { ProjectManagementPanel(exporter: exporter) }
         .sheet(isPresented: $updater.showsReleaseNotes,
                onDismiss: { updater.dismissReleaseNotes() }) {
             AppReleaseNotesPanel(updater: updater)
@@ -487,6 +501,8 @@ struct WorkspaceRootView: View {
             exporter.chooseScanRoot()
         case .rescanProjects:
             exporter.scan()
+        case .manageProjects:
+            if !exporter.projects.isEmpty { exporter.showsProjectManagement = true }
         case .translationSettings:
             language.showsTranslationSettings = true
         case .updateNotes:

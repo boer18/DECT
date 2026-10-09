@@ -33,6 +33,8 @@ enum AppHelpContent {
                 AppHelpBlock("项目结构示例", text: "传统工程：\n<项目目录>/Config/gen.sh\n<项目目录>/Config/luban.conf\n<项目目录>/Config/Datas/\n\n嵌套工程：\n<仓库>/trunk/LubanConfig/gen.sh\n<仓库>/trunk/LubanConfig/luban.conf\n<仓库>/trunk/LubanConfig/Datas/"),
                 AppHelpBlock("项目 Tab", bullets: [
                     "顶部项目 Tab 用来切换当前工程，配置表、多语言和导表日志会跟随当前项目。",
+                    "点击项目栏右侧的“管理项目”按钮，设置项目备注名并用上下箭头排布顺序；TAB 右键可以快速向前或向后移动。保存后立即生效，重启和重新扫描后保留。",
+                    "备注留空恢复原工程名；鼠标停在 TAB 上可查看原名与完整路径。新发现的项目追加到末尾。系统“表格工具”菜单和设置菜单也提供“管理项目”入口。",
                     "项目列表会保存到本机，下次启动优先读取缓存，不必每次完整扫描；新增或移动工程后再点击“重新扫描工程”。",
                     "同名工程会使用完整路径区分，不会因为名称相同而互相覆盖。"
                 ])
