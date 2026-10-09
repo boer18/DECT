@@ -418,14 +418,20 @@ struct WorkspaceRootView: View {
             HStack(spacing: 8) {
                 Text("项目").font(.caption).foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 7) {
+                    HStack(spacing: 0) {
                         ForEach(exporter.projects) { project in
                             Button { exporter.selectedID = project.id } label: {
                                 HStack(spacing: 6) {
                                     Circle().fill(project.id == exporter.selectedID ? Color.accentColor : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
                                     Text(project.name).font(.system(size: 12, weight: project.id == exporter.selectedID ? .semibold : .regular))
-                                }.padding(.horizontal, 12).padding(.vertical, 8)
+                                        .lineLimit(1)
+                                }.padding(.horizontal, 14).padding(.vertical, 10)
+                                    .frame(minWidth: 92, minHeight: 40)
                                     .background(project.id == exporter.selectedID ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                                    // The visual gap belongs to the button, so
+                                    // adjacent tabs have continuous hit areas.
+                                    .padding(.horizontal, 4).padding(.vertical, 2)
+                                    .contentShape(Rectangle())
                             }.buttonStyle(.plain).help("\(project.originalName)\n\(project.rootURL.path)")
                                 .contextMenu {
                                     Button("设置备注名 / 管理项目…") { exporter.showsProjectManagement = true }
