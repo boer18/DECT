@@ -1612,6 +1612,48 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     private var markedBase = ""
     private var handledTextInputEvent = false
     private var lineBreakMonitor: Any?
+    private var expandedCellEditing: ExpandedCellEditingSession?
+
+    override func currentEditor() -> NSText? {
+        if editedRow >= 0, let expandedCellEditing { return expandedCellEditing.textView }
+        return super.currentEditor()
+    }
+
+    override func editColumn(_ column: Int, row: Int, with event: NSEvent?, select: Bool) {
+        super.editColumn(column, row: row, with: event, select: select)
+        guard editedRow >= 0, expandedCellEditing == nil,
+              let textView = super.currentEditor() as? NSTextView else { return }
+        var ancestor = superview
+        while let view = ancestor {
+            if let host = view as? FrozenGridView {
+                expandedCellEditing = ExpandedCellEditingSession(table: self, textView: textView, host: host)
+                break
+            }
+            ancestor = view.superview
+        }
+    }
+
+    override func textDidChange(_ notification: Notification) {
+        super.textDidChange(notification)
+        expandedCellEditing?.resize()
+        DispatchQueue.main.async { [weak self] in self?.expandedCellEditing?.resize() }
+    }
+
+    override func textDidEndEditing(_ notification: Notification) {
+        expandedCellEditing?.restore()
+        expandedCellEditing = nil
+        super.textDidEndEditing(notification)
+    }
+
+    override func abortEditing() -> Bool {
+        // Native abort does not send textDidEndEditing. Restore the hierarchy
+        // here as well so a discarded edit cannot leave an empty overlay.
+        expandedCellEditing?.restore()
+        expandedCellEditing = nil
+        return super.abortEditing()
+    }
+
+    func resizeCellEditor() { expandedCellEditing?.resize() }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1636,6 +1678,7 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                   GridCellEditingSupport.shouldInsertLineBreak(for: event, hasMarkedText: fieldEditor.hasMarkedText())
             else { return event }
             fieldEditor.insertText("\n", replacementRange: fieldEditor.selectedRange())
+            self.resizeCellEditor()
             return nil
         }
     }
@@ -1669,6 +1712,7 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                   fieldEditor.isFieldEditor,
                   !fieldEditor.hasMarkedText() else { return }
             fieldEditor.insertText("\n", replacementRange: fieldEditor.selectedRange())
+            self?.resizeCellEditor()
         }
     }
 
@@ -2493,6 +2537,7 @@ final class FrozenGridView: NSView {
     }
     override func layout() {
         super.layout()
+        defer { regions.forEach { $0.table.resizeCellEditor() } }
         if regions.count == 1 {
             regions[0].alignDocumentToHeader()
             regions[0].scroll.frame = bounds
@@ -2685,7 +2730,10 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
             : searchMatch ? NSColor.systemYellow.withAlphaComponent(0.22)
             : edited ? NSColor.systemOrange.withAlphaComponent(0.12) : .controlBackgroundColor
         field.textColor = c < 0 ? .secondaryLabelColor : .labelColor
-        field.usesSingleLineMode = !model.adaptiveRows || c < 0
+        // Single-line mode also converts inserted/pasted newlines to spaces.
+        // Keep data cells multiline-capable; scrollability and truncation below
+        // still control the compact, non-editing presentation.
+        field.usesSingleLineMode = c < 0
         field.isScrollable = !model.adaptiveRows || c < 0
         field.wraps = model.adaptiveRows && c >= 0
         field.lineBreakMode = model.adaptiveRows && c >= 0 ? .byWordWrapping : .byTruncatingTail

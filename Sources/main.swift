@@ -3056,6 +3056,11 @@ struct LanguageReaderSmokeTest {
             catch { fputs("工作区回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
+        if paths.first == "--cell-editing-smoke" {
+            do { try CellEditingSmokeTests.run() }
+            catch { fputs("单元格展开编辑回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
         if paths.first == "--grid-geometry-smoke" {
             do { try WorkspaceSmokeTests.gridGeometry() }
             catch { fputs("表格几何回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
