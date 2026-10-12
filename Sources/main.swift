@@ -157,7 +157,7 @@ private func localXMLName(_ qualifiedName: String) -> String {
     qualifiedName.split(separator: ":").last.map(String.init) ?? qualifiedName
 }
 
-/// Minimal XLSX reader for the TCST TbLanguage contract. It deliberately reads
+/// Minimal XLSX reader for the TbLanguage/TbFrameLanguage contract. It deliberately reads
 /// only the first worksheet, matching the existing TCST LanguageTool, and never
 /// modifies the workbook. This keeps the desktop tool independent of Unity.
 enum LanguageWorkbookReader {
@@ -181,7 +181,7 @@ enum LanguageWorkbookReader {
     static func read(fileURL: URL) throws -> LocalizationWorkbook {
         let manager = FileManager.default
         guard manager.fileExists(atPath: fileURL.path) else {
-            throw LanguageWorkbookReaderError(message: "找不到 TbLanguage.xlsx：\(fileURL.path)")
+            throw LanguageWorkbookReaderError(message: "找不到语言表：\(fileURL.path)")
         }
 
         let sharedStringsData = try? archiveEntry("xl/sharedStrings.xml", in: fileURL)
@@ -190,12 +190,12 @@ enum LanguageWorkbookReader {
         let rows = try SheetRowsParser.parse(sheetData, sharedStrings: sharedStrings)
 
         guard let header = rows[1] else {
-            throw LanguageWorkbookReaderError(message: "TbLanguage.xlsx 的 Sheet1 缺少表头行。")
+            throw LanguageWorkbookReaderError(message: "\(fileURL.lastPathComponent) 的 Sheet1 缺少表头行。")
         }
         guard let keyColumn = header.first(where: {
             $0.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "key"
         })?.key else {
-            throw LanguageWorkbookReaderError(message: "TbLanguage.xlsx 的 Sheet1 未找到 key 列。")
+            throw LanguageWorkbookReaderError(message: "\(fileURL.lastPathComponent) 的 Sheet1 未找到 key 列。")
         }
 
         let languageColumns = header.compactMap { column, rawHeader -> LocalizationLanguageColumn? in
@@ -213,7 +213,7 @@ enum LanguageWorkbookReader {
         }.sorted { $0.columnIndex < $1.columnIndex }
 
         guard languageColumns.count >= 2 else {
-            throw LanguageWorkbookReaderError(message: "TbLanguage.xlsx 的 Sheet1 未识别出标准语言列。")
+            throw LanguageWorkbookReaderError(message: "\(fileURL.lastPathComponent) 的 Sheet1 未识别出标准语言列。")
         }
 
         let entries = rows.keys.filter { $0 >= 3 }.sorted().compactMap { rowIndex -> LocalizationEntry? in
@@ -305,7 +305,7 @@ final class SheetRowsParser: NSObject, XMLParserDelegate {
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         guard parser.parse() else {
-            throw LanguageWorkbookReaderError(message: "无法解析 TbLanguage.xlsx 的 Sheet1 数据。")
+            throw LanguageWorkbookReaderError(message: "无法解析语言表的 Sheet1 数据。")
         }
         return delegate.rows
     }
@@ -373,18 +373,18 @@ struct LocalizationCellUpdate: Hashable {
 enum LanguageWorkbookWriter {
     /// Changes are first validated in a temporary workbook, then the original
     /// is replaced in one operation. The user requested no project-side backup,
-    /// so this deliberately leaves no .bak file beside TbLanguage.xlsx.
+    /// so this deliberately leaves no .bak file beside either language table.
     static func write(fileURL: URL, updates: [LocalizationCellUpdate]) throws -> LocalizationWorkbook {
         guard !updates.isEmpty else { return try LanguageWorkbookReader.read(fileURL: fileURL) }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw LanguageWorkbookReaderError(message: "找不到要写入的 TbLanguage.xlsx：\(fileURL.path)")
+            throw LanguageWorkbookReaderError(message: "找不到要写入的语言表：\(fileURL.path)")
         }
 
         let manager = FileManager.default
         let temporaryRoot = manager.temporaryDirectory
             .appendingPathComponent("OneClickTableExport-language-write-\(UUID().uuidString)", isDirectory: true)
         let unpackedRoot = temporaryRoot.appendingPathComponent("xlsx", isDirectory: true)
-        let replacementURL = temporaryRoot.appendingPathComponent("TbLanguage.replacement.xlsx")
+        let replacementURL = temporaryRoot.appendingPathComponent("Language.replacement.xlsx")
         defer { try? manager.removeItem(at: temporaryRoot) }
 
         // Translation services can occasionally return an XML 1.0 control
@@ -1101,6 +1101,8 @@ final class LanguageBrowserViewModel: ObservableObject {
     @Published private(set) var consistencyIssues: [TranslationConsistencyIssue] = []
     @Published private(set) var consistencyCheckedEntryCount = 0
     @Published var selectedProjectID: String?
+    @Published private(set) var selectedWorkbookKind: LanguageWorkbookKind = .main
+    @Published private(set) var availableWorkbookKinds: [LanguageWorkbookKind] = [.main]
     @Published var selectedEntryID: LocalizationEntry.ID?
     @Published var searchText = ""
     @Published var showsTranslationSettings = false
@@ -1110,14 +1112,18 @@ final class LanguageBrowserViewModel: ObservableObject {
     private var operationTask: Task<Void, Never>?
     private var loadedFingerprint: Data?
     private var conflictingDrafts: Set<String> = []
+    private var workbookURLs: [LanguageWorkbookKind: URL] = [:]
+    private var preferredWorkbookKinds: [String: LanguageWorkbookKind] = [:]
+    private let defaults: UserDefaults
 
     private static let selectedLanguageProjectDefaultsKey = "lastLanguageProjectRoot"
     private var drafts: [Int: [String: String]] = [:]
     private var draftOriginals: [Int: [String: String]] = [:]
     @Published private var draftRevision = 0
 
-    init() {
-        selectedProjectID = UserDefaults.standard.string(forKey: Self.selectedLanguageProjectDefaultsKey)
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        selectedProjectID = defaults.string(forKey: Self.selectedLanguageProjectDefaultsKey)
     }
 
     var isBusy: Bool { isLoading || isSaving || isTranslating || isCheckingConsistency }
@@ -1149,12 +1155,16 @@ final class LanguageBrowserViewModel: ObservableObject {
 
     func ensureProject(available projects: [ExportProject], preferredProjectID: String?) {
         guard !projects.isEmpty else {
+            guard persistDrafts() else { return }
             workbook = nil
             selectedEntryID = nil
+            workbookURLs = [:]
+            availableWorkbookKinds = [.main]
+            selectedWorkbookKind = .main
             return
         }
         let preferredID = preferredProjectID ?? selectedProjectID
-            ?? UserDefaults.standard.string(forKey: Self.selectedLanguageProjectDefaultsKey)
+            ?? defaults.string(forKey: Self.selectedLanguageProjectDefaultsKey)
         let project = projects.first { $0.id == preferredID } ?? projects.first
         if let project, project.id != selectedProjectID || workbook == nil {
             select(project: project)
@@ -1162,17 +1172,38 @@ final class LanguageBrowserViewModel: ObservableObject {
     }
 
     func select(project: ExportProject) {
-        guard !isBusy else { return }
-        persistDrafts()
+        guard !isBusy, persistDrafts() else { return }
+        if let selectedProjectID { preferredWorkbookKinds[selectedProjectID] = selectedWorkbookKind }
+        let preferredKind = project.id == selectedProjectID ? selectedWorkbookKind : preferredWorkbookKinds[project.id] ?? .main
         selectedProjectID = project.id
-        UserDefaults.standard.set(project.id, forKey: Self.selectedLanguageProjectDefaultsKey)
+        defaults.set(project.id, forKey: Self.selectedLanguageProjectDefaultsKey)
+        discoverWorkbooks(in: project, preferredKind: preferredKind)
         load(project: project)
     }
 
+    func selectWorkbook(_ kind: LanguageWorkbookKind, in project: ExportProject) {
+        guard project.id == selectedProjectID, !isBusy, kind != selectedWorkbookKind,
+              availableWorkbookKinds.contains(kind), persistDrafts() else { return }
+        selectedWorkbookKind = kind
+        preferredWorkbookKinds[project.id] = kind
+        searchText = ""
+        entryFilter = .all
+        load(project: project)
+    }
+
+    private func discoverWorkbooks(in project: ExportProject, preferredKind: LanguageWorkbookKind) {
+        workbookURLs = Dictionary(uniqueKeysWithValues: LanguageWorkbookKind.allCases.compactMap { kind in
+            ProjectConfigurationResolver.languageWorkbookURL(in: project, kind: kind).map { (kind, $0) }
+        })
+        let foundKinds = LanguageWorkbookKind.allCases.filter { workbookURLs[$0] != nil }
+        availableWorkbookKinds = foundKinds.isEmpty ? [.main] : foundKinds
+        selectedWorkbookKind = availableWorkbookKinds.contains(preferredKind) ? preferredKind : availableWorkbookKinds[0]
+    }
+
     func reload(available projects: [ExportProject]) {
-        guard !isBusy else { return }
-        persistDrafts()
+        guard !isBusy, persistDrafts() else { return }
         guard let project = projects.first(where: { $0.id == selectedProjectID }) else { return }
+        discoverWorkbooks(in: project, preferredKind: selectedWorkbookKind)
         load(project: project)
     }
 
@@ -1247,7 +1278,7 @@ final class LanguageBrowserViewModel: ObservableObject {
             actionMessage = "所有可翻译语言都已有内容。"
             return
         }
-        let configuration = TranslationSettingsStore.load()
+        let configuration = TranslationSettingsStore.load(defaults: defaults)
         guard configuration.hasAPIKey else {
             errorMessage = "请先在“翻译 API 设置”中填写本工具的 API Key。"
             showsTranslationSettings = true
@@ -1308,7 +1339,7 @@ final class LanguageBrowserViewModel: ObservableObject {
             actionMessage = "没有可用简中或英文原文且含已有译文的词条，无法进行一致性检查。"
             return
         }
-        let configuration = TranslationSettingsStore.load()
+        let configuration = TranslationSettingsStore.load(defaults: defaults)
         guard configuration.hasAPIKey else {
             errorMessage = "请先在“翻译 API 设置”中填写本工具的 API Key。"
             showsTranslationSettings = true
@@ -1479,16 +1510,20 @@ final class LanguageBrowserViewModel: ObservableObject {
 
     private func load(project: ExportProject) {
         let projectID = project.id
-        let languageFile = ProjectConfigurationResolver.languageWorkbookURL(in: project)
+        let kind = selectedWorkbookKind
+        let languageFile = workbookURLs[kind]
         isLoading = true
         errorMessage = nil
         actionMessage = nil
         workbook = nil
+        loadedFingerprint = nil
         selectedEntryID = nil
         drafts.removeAll()
         draftOriginals.removeAll()
         conflictingDrafts.removeAll()
         consistencyIssues = []; consistencyCheckedEntryCount = 0
+        showsConsistencyResults = false
+        operationProgress = 0
         draftRevision &+= 1
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1497,11 +1532,11 @@ final class LanguageBrowserViewModel: ObservableObject {
                 result = Result { try LanguageWorkbookReader.read(fileURL: languageFile) }
             } else {
                 result = .failure(LanguageWorkbookReaderError(
-                    message: "在配置表目录中找不到主 TbLanguage.xlsx：\(project.dataRootURL.path)"
+                    message: "在配置表目录中找不到 \(kind.fileName)：\(project.dataRootURL.path)"
                 ))
             }
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.selectedProjectID == projectID else { return }
+                guard let self, self.selectedProjectID == projectID, self.selectedWorkbookKind == kind else { return }
                 self.isLoading = false
                 switch result {
                 case .success(let workbook):
@@ -1522,14 +1557,20 @@ final class LanguageBrowserViewModel: ObservableObject {
         if !filteredEntries.contains(where: { $0.id == selectedEntryID }) { selectedEntryID = filteredEntries.first?.id }
     }
 
-    private func persistDrafts() {
-        guard let workbook else { return }
+    @discardableResult
+    private func persistDrafts() -> Bool {
+        guard let workbook else { return true }
         let saved = workbook.entries.compactMap { entry -> SavedTranslationDraft? in
             guard let values = drafts[entry.rowIndex] else { return nil }
             return SavedTranslationDraft(key: entry.key, originals: draftOriginals[entry.rowIndex] ?? entry.translations, translations: values)
         }
-        do { try TranslationDraftStore.save(saved, for: workbook.fileURL) }
-        catch { errorMessage = "草稿暂时无法保存到本机：\(error.localizedDescription)" }
+        do {
+            try TranslationDraftStore.save(saved, for: workbook.fileURL)
+            return true
+        } catch {
+            errorMessage = "草稿暂时无法保存到本机：\(error.localizedDescription)"
+            return false
+        }
     }
 
     private func restoreDrafts() {
@@ -2494,8 +2535,9 @@ struct LanguageBrowserView: View {
                     .foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("多语言").font(.title2.weight(.semibold))
-                    Text("翻译、手工修改会直接写入工程自己的 TbLanguage.xlsx")
+                    Text("翻译、手工修改会直接写入工程自己的 \(model.selectedWorkbookKind.fileName)")
                         .foregroundStyle(.secondary)
+                        .help(model.workbook?.fileURL.path ?? model.selectedWorkbookKind.fileName)
                 }
                 Spacer()
                 Button { model.showsTranslationSettings = true } label: {
@@ -2505,6 +2547,22 @@ struct LanguageBrowserView: View {
                     Label("重新读取", systemImage: "arrow.clockwise")
                 }
                 .disabled(projects.isEmpty || model.isBusy)
+            }
+
+            if model.availableWorkbookKinds.contains(.framework) {
+                Picker("语言表", selection: Binding(
+                    get: { model.selectedWorkbookKind },
+                    set: { kind in
+                        if let project = selectedLanguageProject { model.selectWorkbook(kind, in: project) }
+                    }
+                )) {
+                    ForEach(model.availableWorkbookKinds) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 300)
+                .disabled(model.isBusy)
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -2534,6 +2592,7 @@ struct LanguageBrowserView: View {
                         model.savePendingChanges()
                     }
                     .disabled(model.isBusy || model.pendingChangeCount == 0)
+                    .help("保存当前选中语言表的全部修改")
 
                     Button("保存并导表") {
                         guard let project = selectedLanguageProject else { return }
@@ -3059,6 +3118,11 @@ struct LanguageReaderSmokeTest {
         if paths.first == "--cell-editing-smoke" {
             do { try CellEditingSmokeTests.run() }
             catch { fputs("单元格展开编辑回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
+        if paths.first == "--language-workbook-smoke" {
+            do { try LanguageWorkbookSmokeTests.run(Array(paths.dropFirst())) }
+            catch { fputs("框架多语言回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
         if paths.first == "--grid-geometry-smoke" {

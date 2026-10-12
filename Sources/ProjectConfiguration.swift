@@ -1,5 +1,13 @@
 import Foundation
 
+enum LanguageWorkbookKind: String, CaseIterable, Identifiable {
+    case main, framework
+
+    var id: String { rawValue }
+    var displayName: String { self == .main ? "游戏多语言" : "框架多语言" }
+    var fileName: String { self == .main ? "TbLanguage.xlsx" : "TbFrameLanguage.xlsx" }
+}
+
 /// The part of a project layout that is needed by the table tool.
 ///
 /// A Unity repository may keep its Luban configuration in a directory named
@@ -132,12 +140,15 @@ enum ProjectConfigurationResolver {
         return ["DOTNET_ROLL_FORWARD": "Major"]
     }
 
-    /// Finds the main `TbLanguage.xlsx` without mistaking framework/story
-    /// localization workbooks for the project's primary language table.
-    static func languageWorkbookURL(in project: ExportProject) -> URL? {
+    /// Exact filenames keep game and framework localization separate, including
+    /// projects whose language tables live beneath nested data directories.
+    static func languageWorkbookURL(in project: ExportProject, kind: LanguageWorkbookKind = .main) -> URL? {
         let manager = FileManager.default
-        let direct = project.dataRootURL.appendingPathComponent("TbLanguage.xlsx", isDirectory: false)
-        if manager.isReadableFile(atPath: direct.path) { return direct.standardizedFileURL }
+        let direct = project.dataRootURL.appendingPathComponent(kind.fileName, isDirectory: false)
+        if manager.isReadableFile(atPath: direct.path),
+           (try? direct.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            return direct.standardizedFileURL
+        }
 
         guard let enumerator = manager.enumerator(
             at: project.dataRootURL,
@@ -146,7 +157,8 @@ enum ProjectConfigurationResolver {
         ) else { return nil }
         let matches = enumerator.compactMap { item -> URL? in
             guard let url = item as? URL,
-                  url.lastPathComponent.caseInsensitiveCompare("TbLanguage.xlsx") == .orderedSame,
+                  url.lastPathComponent.caseInsensitiveCompare(kind.fileName) == .orderedSame,
+                  manager.isReadableFile(atPath: url.path),
                   (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
             else { return nil }
             return url.standardizedFileURL

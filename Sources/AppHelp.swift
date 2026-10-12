@@ -108,16 +108,17 @@ enum AppHelpContent {
             id: "language",
             title: "多语言工具",
             icon: "character.book.closed",
-            summary: "读取当前项目主 TbLanguage.xlsx，批量补齐缺失翻译、保存并导表，还可以做翻译一致性检查。",
+            summary: "读取当前项目的 TbLanguage.xlsx 或 TbFrameLanguage.xlsx，批量补齐缺失翻译、保存并导表，还可以做翻译一致性检查。",
             blocks: [
+                AppHelpBlock("游戏与框架多语言", text: "默认读取游戏主语言表；当前项目存在 TbFrameLanguage.xlsx 时，显示“游戏多语言 / 框架多语言”切换，框架表可以位于 FrameWork 等子目录中。顶部会显示当前写入的文件名，全部操作只处理当前选中的语言表。没有框架表的项目不显示该选项。“重新读取”也会更新框架表是否存在。"),
                 AppHelpBlock("翻译前设置", text: "第一次使用翻译功能时，工具会提示打开“翻译 API 设置”。每位使用者都需要填写本工具自己的 API Key；Key、API URL 和 Model 会保存在本工具的本机设置中。工具不会读取或复用 TCST 的 Key。"),
                 AppHelpBlock("顶部操作", bullets: [
-                    "“翻译全部缺失”只处理当前项目中空白的语言单元格。",
-                    "“保存全部”把当前草稿直接写回 TbLanguage.xlsx，不生成备份。",
+                    "“翻译全部缺失”只处理当前选中语言表中空白的语言单元格。",
+                    "“保存全部”把当前草稿直接写回选中的 TbLanguage.xlsx 或 TbFrameLanguage.xlsx，不生成备份。",
                     "“翻译并导表”完成翻译后自动保存并运行当前项目的导表脚本。",
                     "“AI 一致性检查”检查已有译文与原文含义、占位符和标签是否一致，不会自动修改表格。"
                 ]),
-                AppHelpBlock("草稿和冲突", text: "翻译结果会先保存在本机草稿中，任务中断或应用重启后可以继续。保存前如果原始语言表被其他程序修改，工具会拦截写入并保留草稿，避免覆盖外部修改。")
+                AppHelpBlock("草稿和冲突", text: "游戏表和框架表的草稿按完整文件路径独立保存，切换语言表、任务中断或应用重启后可以继续。保存前如果原始语言表被其他程序修改，工具会拦截写入并保留草稿，避免覆盖外部修改。")
             ]
         ),
         AppHelpTopic(
@@ -178,7 +179,7 @@ enum AppHelpContent {
             summary: "遇到工程识别、输入、刷新或更新问题时，可以先从这里排查。",
             blocks: [
                 AppHelpBlock("找不到项目", text: "确认选择的是包含工程的 Project 根目录，而不是某个工程内部的 Config 或 LubanConfig 目录。工程必须有 gen.sh、同目录 luban.conf，并且 dataDir 指向实际存在的表格目录。"),
-                AppHelpBlock("找不到语言表", text: "多语言工具优先寻找当前工程数据根目录下的 TbLanguage.xlsx。如果工程把主语言表放在更深的子目录，也会递归寻找；框架和故事语言表不会被误当作主表。"),
+                AppHelpBlock("找不到语言表", text: "多语言工具在当前工程数据根目录及子目录中分别按准确文件名查找 TbLanguage.xlsx 和 TbFrameLanguage.xlsx，不会把框架或故事表误当成主表。新增框架表后点击“重新读取”即可更新选项。"),
                 AppHelpBlock("表格显示不完整", bullets: [
                     "使用表格工具栏的缩放或“重置大小”。",
                     "通过“自适应”调整列宽和行高；极长文本可以在内容栏展开查看全文。",
