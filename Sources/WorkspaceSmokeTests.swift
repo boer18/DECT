@@ -291,6 +291,15 @@ enum WorkspaceSmokeTests {
         }
         let (headerInClip, firstInClip) = try checkTopRow(region, label: "100% 单表")
         print("GRID_GEOMETRY header=\(header) first=\(first) firstInClip=\(firstInClip) headerInClip=\(headerInClip) visible=\(visible) origin=\(origin) table=\(table.frame)")
+        region.scroll.contentView.scroll(to: NSPoint(x: 100, y: 0))
+        region.scroll.reflectScrolledClipView(region.scroll.contentView)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        guard let headerClip = table.headerView?.superview as? NSClipView else {
+            throw WorkspaceError(message: "普通表格缺少列标题裁剪区")
+        }
+        try require(region.scroll.contentView.bounds.origin.x > 1 &&
+                    abs(headerClip.bounds.origin.x - region.scroll.contentView.bounds.origin.x) < 1,
+                    "普通表格横向滚动后列标题未跟随：body=\(region.scroll.contentView.bounds.origin.x) header=\(headerClip.bounds.origin.x)")
         editor.setZoom(1.5); grid.update(); grid.layoutSubtreeIfNeeded()
         let (_, scaledFirstInClip) = try checkTopRow(region, label: "150% 单表")
         try require(abs(scaledFirstInClip.minY - 34.5) < 0.5, "缩放后第一行未跟随表头下移：\(scaledFirstInClip)")
@@ -298,6 +307,19 @@ enum WorkspaceSmokeTests {
         grid.update(); grid.layoutSubtreeIfNeeded()
         guard let frozenTop = grid.regions.first else { throw WorkspaceError(message: "冻结测试没有左上区域") }
         _ = try checkTopRow(frozenTop, label: "冻结左上区域")
+        let frozenTopBody = grid.regions[1]
+        let frozenScrollableBody = grid.regions[3]
+        frozenScrollableBody.scroll.contentView.scroll(to: NSPoint(x: 100, y: 0))
+        frozenScrollableBody.scroll.reflectScrolledClipView(frozenScrollableBody.scroll.contentView)
+        grid.sync(from: 3)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        guard let frozenHeaderClip = frozenTopBody.table.headerView?.superview as? NSClipView else {
+            throw WorkspaceError(message: "冻结表格缺少顶部列标题裁剪区")
+        }
+        try require(frozenScrollableBody.scroll.contentView.bounds.origin.x > 1 &&
+                    abs(frozenTopBody.scroll.contentView.bounds.origin.x - frozenScrollableBody.scroll.contentView.bounds.origin.x) < 1 &&
+                    abs(frozenHeaderClip.bounds.origin.x - frozenTopBody.scroll.contentView.bounds.origin.x) < 1,
+                    "冻结表格横向滚动后顶部列标题未跟随")
         window.orderOut(nil)
     }
 

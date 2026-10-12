@@ -2422,7 +2422,11 @@ final class FrozenGridView: NSView {
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         self.updateFillOptionsButton()
-                        if self.regions.count == 4 { self.sync(from: index) }
+                        if self.regions.count == 4 {
+                            self.sync(from: index)
+                        } else if self.regions.indices.contains(index) {
+                            self.regions[index].synchronizeHeaderHorizontalOffset()
+                        }
                     }
                 })
             }
@@ -2573,6 +2577,7 @@ final class FrozenGridView: NSView {
             region.scroll.hasHorizontalScroller = isBody || needsFrozenHorizontalScroll
             region.scroll.hasVerticalScroller = isBody || needsFrozenVerticalScroll
         }
+        regions.forEach { $0.synchronizeHeaderHorizontalOffset() }
         updateFillOptionsButton()
     }
     func sync(from index: Int) {
@@ -2587,6 +2592,7 @@ final class FrozenGridView: NSView {
             regions[other].scroll.reflectScrolledClipView(regions[other].scroll.contentView)
         }
         syncing = false
+        regions.forEach { $0.synchronizeHeaderHorizontalOffset() }
     }
 }
 
@@ -2686,6 +2692,19 @@ final class GridRegion: NSObject, NSTableViewDelegate, NSTableViewDataSource {
         }
         guard abs(table.frame.origin.y - topInset) > 0.5 else { return }
         table.setFrameOrigin(NSPoint(x: table.frame.origin.x, y: topInset))
+    }
+
+    func synchronizeHeaderHorizontalOffset() {
+        guard let header = table.headerView,
+              let headerClip = header.superview as? NSClipView else { return }
+        let contentOffset = scroll.contentView.bounds.origin.x
+        let maximumOffset = max(0, header.frame.width - headerClip.bounds.width)
+        let targetX = min(max(0, contentOffset), maximumOffset)
+        guard abs(headerClip.bounds.origin.x - targetX) > 0.5 else { return }
+        var target = headerClip.bounds.origin
+        target.x = targetX
+        headerClip.scroll(to: target)
+        header.needsDisplay = true
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { range.count }
