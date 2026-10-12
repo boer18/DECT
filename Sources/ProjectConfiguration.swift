@@ -6,6 +6,12 @@ enum LanguageWorkbookKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var displayName: String { self == .main ? "游戏多语言" : "框架多语言" }
     var fileName: String { self == .main ? "TbLanguage.xlsx" : "TbFrameLanguage.xlsx" }
+    var exportKind: TableExportKind { self == .framework ? .framework : .game }
+}
+
+enum TableExportKind: String {
+    case game, framework
+    var displayName: String { self == .framework ? "框架表导出" : "导表" }
 }
 
 /// The part of a project layout that is needed by the table tool.
@@ -71,10 +77,10 @@ enum ProjectConfigurationResolver {
         return nil
     }
 
-    static func layout(for generatorURL: URL) -> LubanProjectLayout? {
+    static func layout(for generatorURL: URL, configurationFileName: String = "luban.conf") -> LubanProjectLayout? {
         let generator = generatorURL.standardizedFileURL
         let configurationRoot = generator.deletingLastPathComponent().standardizedFileURL
-        let lubanConfig = configurationRoot.appendingPathComponent("luban.conf", isDirectory: false)
+        let lubanConfig = configurationRoot.appendingPathComponent(configurationFileName, isDirectory: false)
         let manager = FileManager.default
         guard manager.isReadableFile(atPath: generator.path),
               manager.isReadableFile(atPath: lubanConfig.path),
@@ -97,6 +103,37 @@ enum ProjectConfigurationResolver {
             generatorURL: generator,
             lubanConfigURL: lubanConfig
         )
+    }
+
+    static func frameworkLayout(in project: ExportProject) -> LubanProjectLayout? {
+        layout(for: project.configurationRootURL.appendingPathComponent("gen_framework.sh"),
+               configurationFileName: "luban_framework.conf")
+    }
+
+    static func hasFrameworkTables(in project: ExportProject) -> Bool {
+        let config = project.configurationRootURL.appendingPathComponent("luban_framework.conf")
+        if let directory = dataDirectory(from: config) {
+            let root = directory.hasPrefix("/") ? URL(fileURLWithPath: directory)
+                : project.configurationRootURL.appendingPathComponent(directory)
+            if containsExcelTables(in: root) { return true }
+        }
+        // Detect tables even when their export entrypoint is missing, so the
+        // UI can explain why framework export is disabled instead of guessing.
+        let children = (try? FileManager.default.contentsOfDirectory(at: project.dataRootURL,
+            includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        if children.contains(where: { $0.lastPathComponent.caseInsensitiveCompare("FrameWork") == .orderedSame && containsExcelTables(in: $0) }) { return true }
+        return languageWorkbookURL(in: project, kind: .framework) != nil
+    }
+
+    private static func containsExcelTables(in root: URL) -> Bool {
+        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return false }
+        for case let file as URL in files {
+            if ["xlsx", "xls", "xlsm"].contains(file.pathExtension.lowercased()),
+               !file.lastPathComponent.hasPrefix("~$"),
+               (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true { return true }
+        }
+        return false
     }
 
     /// Reads the runtime requested by the Luban executable used by a generator.

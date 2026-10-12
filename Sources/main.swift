@@ -2225,7 +2225,7 @@ final class ExportViewModel: ObservableObject {
             // failed scan. The full standardized path prevents same-name projects
             // in different folders from being confused with each other.
             if let selectedID {
-                UserDefaults.standard.set(selectedID, forKey: Self.selectedProjectDefaultsKey)
+                defaults.set(selectedID, forKey: Self.selectedProjectDefaultsKey)
             }
         }
     }
@@ -2234,9 +2234,11 @@ final class ExportViewModel: ObservableObject {
     @Published private(set) var log = ""
     @Published private(set) var hasScanned = false
     @Published private(set) var usingCachedProjectList = false
+    @Published private(set) var activeExportKind: TableExportKind = .game
 
     private let scanner = ProjectScanner()
-    private var presentation = ProjectPresentationPreferences.load()
+    private var presentation: ProjectPresentationPreferences
+    private let defaults: UserDefaults
     private static let selectedProjectDefaultsKey = "lastSelectedProjectRoot"
     private static let projectListCacheDefaultsKey = "projectListCache"
     private var activeProcess: Process?
@@ -2249,15 +2251,17 @@ final class ExportViewModel: ObservableObject {
         return formatter
     }()
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        presentation = ProjectPresentationPreferences.load(defaults: defaults)
         let defaultRoot = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
             .appendingPathComponent("Project", isDirectory: true)
-        if let path = UserDefaults.standard.string(forKey: "scanRoot") {
+        if let path = defaults.string(forKey: "scanRoot") {
             scanRoot = URL(fileURLWithPath: path, isDirectory: true)
         } else {
             scanRoot = defaultRoot
         }
-        selectedID = UserDefaults.standard.string(forKey: Self.selectedProjectDefaultsKey)
+        selectedID = defaults.string(forKey: Self.selectedProjectDefaultsKey)
         restoreCachedProjectList()
     }
 
@@ -2331,7 +2335,7 @@ final class ExportViewModel: ObservableObject {
         panel.prompt = "使用此目录"
         if panel.runModal() == .OK, let url = panel.url {
             scanRoot = url.standardizedFileURL
-            UserDefaults.standard.set(scanRoot.path, forKey: "scanRoot")
+            defaults.set(scanRoot.path, forKey: "scanRoot")
             appendLog("\n[\(timestamp())] 扫描目录已切换为：\(scanRoot.path)\n")
             scan()
         }
@@ -2342,30 +2346,46 @@ final class ExportViewModel: ObservableObject {
         export(project: project)
     }
 
-    func export(project: ExportProject) {
+    func export(project: ExportProject, kind: TableExportKind = .game) {
         guard !isExporting else { return }
+        let layout: LubanProjectLayout
+        if kind == .framework {
+            guard let framework = ProjectConfigurationResolver.frameworkLayout(in: project) else {
+                state = .failed("框架导表入口不可用")
+                log = "无法导出框架表：请检查 \(project.configurationRootURL.path) 中的 gen_framework.sh、luban_framework.conf 及框架数据目录。未执行普通导表脚本。\n"
+                return
+            }
+            layout = framework
+        } else {
+            layout = LubanProjectLayout(configurationRootURL: project.configurationRootURL,
+                dataRootURL: project.dataRootURL, generatorURL: project.generatorURL,
+                lubanConfigURL: project.configurationRootURL.appendingPathComponent("luban.conf"))
+        }
         selectedID = project.id
+        activeExportKind = kind
         log = ""
         state = .exporting
-        appendLog("[\(timestamp())] 开始导表\n")
+        appendLog("[\(timestamp())] 开始\(kind.displayName)\n")
         appendLog("工程：\(project.displayPath)\n")
         appendLog("工程目录：\(project.rootURL.path)\n")
-        appendLog("脚本：\(project.generatorURL.path)\n\n")
-        appendLog("执行目录：\(project.workingDirectoryURL.path)\n\n")
+        appendLog("配置文件：\(layout.lubanConfigURL.path)\n")
+        appendLog("配置表目录：\(layout.dataRootURL.path)\n")
+        appendLog("脚本：\(layout.generatorURL.path)\n\n")
+        appendLog("执行目录：\(layout.configurationRootURL.path)\n\n")
 
-        if let runtime = ProjectConfigurationResolver.lubanRuntimeInfo(for: project.generatorURL) {
+        if let runtime = ProjectConfigurationResolver.lubanRuntimeInfo(for: layout.generatorURL) {
             appendLog("Luban 运行时：\(runtime.description)\n")
         }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [project.generatorURL.path]
+        process.arguments = [layout.generatorURL.path]
         // Each project script is run from its own configuration directory. This
         // preserves relative paths for both Config and nested layouts such as
         // TCR/trunk/LubanConfig.
-        process.currentDirectoryURL = project.workingDirectoryURL
+        process.currentDirectoryURL = layout.configurationRootURL
         var environment = ProcessInfo.processInfo.environment
-        let environmentOverrides = ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: project.generatorURL)
+        let environmentOverrides = ProjectConfigurationResolver.dotnetEnvironmentOverrides(for: layout.generatorURL)
         if !environmentOverrides.isEmpty {
             for (key, value) in environmentOverrides {
                 environment[key] = value
@@ -2429,7 +2449,7 @@ final class ExportViewModel: ObservableObject {
         activeProcess = nil
         if exitCode == 0 && !wasStopped {
             state = .succeeded(Date())
-            appendLog("\n[\(timestamp())] ✓ 导表完成。\n")
+            appendLog("\n[\(timestamp())] ✓ \(activeExportKind.displayName)完成。\n")
         } else if wasStopped {
             state = .failed("已由用户停止")
             appendLog("\n[\(timestamp())] 导表已停止。\n")
@@ -2448,7 +2468,7 @@ final class ExportViewModel: ObservableObject {
     }
 
     private func restoreCachedProjectList() {
-        guard let data = UserDefaults.standard.data(forKey: Self.projectListCacheDefaultsKey),
+        guard let data = defaults.data(forKey: Self.projectListCacheDefaultsKey),
               let cache = try? JSONDecoder().decode(ProjectListCache.self, from: data),
               cache.scanRootPath == scanRoot.standardizedFileURL.path
         else { return }
@@ -2471,14 +2491,14 @@ final class ExportViewModel: ObservableObject {
             projects: projects.map(CachedExportProject.init)
         )
         guard let data = try? JSONEncoder().encode(cache) else { return }
-        UserDefaults.standard.set(data, forKey: Self.projectListCacheDefaultsKey)
+        defaults.set(data, forKey: Self.projectListCacheDefaultsKey)
     }
 
     func updateProjectPresentation(_ orderedProjects: [ExportProject]) {
         guard Set(orderedProjects.map(\.id)) == Set(projects.map(\.id)),
               orderedProjects.count == projects.count else { return }
         presentation.update(from: orderedProjects)
-        presentation.save()
+        presentation.save(defaults: defaults)
         projects = presentation.apply(to: projects)
     }
 
@@ -2497,7 +2517,7 @@ final class ExportViewModel: ObservableObject {
 struct LanguageBrowserView: View {
     let projects: [ExportProject]
     let preferredProjectID: String?
-    let exportAction: (ExportProject) -> Void
+    let exportAction: (ExportProject, TableExportKind) -> Void
     @ObservedObject var model: LanguageBrowserViewModel
 
     var body: some View {
@@ -2580,11 +2600,13 @@ struct LanguageBrowserView: View {
 
                     Button {
                         guard let project = selectedLanguageProject else { return }
-                        model.translateAllMissing(thenExportProject: project, exportAction: exportAction)
+                        let kind = model.selectedWorkbookKind.exportKind
+                        model.translateAllMissing(thenExportProject: project, exportAction: { exportAction($0, kind) })
                     } label: {
                         Label("翻译缺失并导表", systemImage: "play.fill")
                     }
-                    .disabled(model.isBusy || model.missingTranslationCellCount == 0 || selectedLanguageProject == nil)
+                    .disabled(model.isBusy || model.missingTranslationCellCount == 0 || !canExportSelectedWorkbook)
+                    .help(selectedExportHelp)
 
                     Divider().frame(height: 24)
 
@@ -2596,9 +2618,11 @@ struct LanguageBrowserView: View {
 
                     Button("保存并导表") {
                         guard let project = selectedLanguageProject else { return }
-                        model.savePendingChanges { exportAction(project) }
+                        let kind = model.selectedWorkbookKind.exportKind
+                        model.savePendingChanges { exportAction(project, kind) }
                     }
-                    .disabled(model.isBusy || selectedLanguageProject == nil)
+                    .disabled(model.isBusy || !canExportSelectedWorkbook)
+                    .help(selectedExportHelp)
 
                     Divider().frame(height: 24)
 
@@ -2648,6 +2672,17 @@ struct LanguageBrowserView: View {
     private var selectedLanguageProject: ExportProject? {
         guard let projectID = model.selectedProjectID else { return nil }
         return projects.first { $0.id == projectID }
+    }
+
+    private var canExportSelectedWorkbook: Bool {
+        guard let project = selectedLanguageProject else { return false }
+        return model.selectedWorkbookKind == .main || ProjectConfigurationResolver.frameworkLayout(in: project) != nil
+    }
+
+    private var selectedExportHelp: String {
+        if model.selectedWorkbookKind == .main { return "保存后执行当前项目的普通导表脚本" }
+        return canExportSelectedWorkbook ? "保存后执行当前项目的 gen_framework.sh"
+            : "框架导表需要有效的 gen_framework.sh、luban_framework.conf 和框架数据目录"
     }
 
     private var languageProjectTabs: some View {
@@ -3123,6 +3158,11 @@ struct LanguageReaderSmokeTest {
         if paths.first == "--language-workbook-smoke" {
             do { try LanguageWorkbookSmokeTests.run(Array(paths.dropFirst())) }
             catch { fputs("框架多语言回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
+            return
+        }
+        if paths.first == "--framework-export-smoke" {
+            do { try FrameworkExportSmokeTests.run(Array(paths.dropFirst())) }
+            catch { fputs("框架导表回归失败：\(error.localizedDescription)\n", stderr); Foundation.exit(1) }
             return
         }
         if paths.first == "--grid-geometry-smoke" {

@@ -90,8 +90,9 @@ final class TableWorkspaceModel: ObservableObject {
         if favorites.contains(id) { favorites.remove(id) } else { favorites.insert(id) }
         UserDefaults.standard.set(Array(favorites), forKey: "favoriteConfigTables")
     }
-    func saveProject(_ project: ExportProject, completion: @escaping () -> Void) {
-        let editors = documents.values.filter { $0.snapshot?.fileURL.path.hasPrefix(project.rootURL.path + "/") == true && $0.hasPendingChanges }
+    func saveProject(_ project: ExportProject, dataRoot: URL? = nil, completion: @escaping () -> Void) {
+        let root = (dataRoot ?? project.rootURL).standardizedFileURL.path + "/"
+        let editors = documents.values.filter { $0.snapshot?.fileURL.standardizedFileURL.path.hasPrefix(root) == true && $0.hasPendingChanges }
         func next(_ offset: Int) {
             guard offset < editors.count else { completion(); return }
             editors[offset].save { next(offset + 1) }
@@ -414,6 +415,15 @@ struct WorkspaceRootView: View {
                     Label(exporter.isExporting ? "正在导表…" : "导表", systemImage: "play.fill")
                 }.buttonStyle(.borderedProminent).disabled(exporter.selectedProject == nil || exporter.isExporting || language.isBusy || workspace.isBusy)
                     .keyboardShortcut(.return, modifiers: .command)
+                if let project = exporter.selectedProject, ProjectConfigurationResolver.hasFrameworkTables(in: project) {
+                    Button { runExport(project, kind: .framework) } label: {
+                        Label(exporter.isExporting && exporter.activeExportKind == .framework ? "正在导出框架表…" : "导出框架表", systemImage: "square.stack.3d.up")
+                    }
+                    .disabled(exporter.isExporting || language.isBusy || workspace.isBusy || ProjectConfigurationResolver.frameworkLayout(in: project) == nil)
+                    .help(ProjectConfigurationResolver.frameworkLayout(in: project) != nil
+                        ? "使用当前项目的 gen_framework.sh 导出框架 Excel 配置表"
+                        : "发现框架表，但缺少有效的 gen_framework.sh、luban_framework.conf 或框架数据目录")
+                }
             }.padding(.horizontal, 18).padding(.vertical, 12)
             HStack(spacing: 8) {
                 Text("项目").font(.caption).foregroundStyle(.secondary)
@@ -464,7 +474,8 @@ struct WorkspaceRootView: View {
                         section = "tables"
                     })
                 case "language":
-                    LanguageBrowserView(projects: exporter.projects, preferredProjectID: exporter.selectedID, exportAction: runExport, model: language)
+                    LanguageBrowserView(projects: exporter.projects, preferredProjectID: exporter.selectedID,
+                        exportAction: { runExport($0, kind: $1) }, model: language)
                 default: ExportLogWorkspace(model: exporter)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -522,9 +533,18 @@ struct WorkspaceRootView: View {
         if let project = exporter.selectedProject { runExport(project) }
     }
     private func runExport(_ project: ExportProject) {
+        runExport(project, kind: .game)
+    }
+    private func runExport(_ project: ExportProject, kind: TableExportKind) {
         guard !exporter.isExporting, !workspace.isBusy, !language.isBusy else { return }
-        let finish = { workspace.saveProject(project) { exporter.export(project: project); section = "export" } }
-        if language.selectedProjectID == project.id && language.pendingChangeCount > 0 { language.savePendingChanges(afterSave: finish) }
+        let framework = kind == .framework ? ProjectConfigurationResolver.frameworkLayout(in: project) : nil
+        guard kind != .framework || framework != nil else { return }
+        let finish = { workspace.saveProject(project, dataRoot: framework?.dataRootURL) {
+            exporter.export(project: project, kind: kind); section = "export"
+        } }
+        if language.selectedProjectID == project.id && language.selectedWorkbookKind.exportKind == kind && language.pendingChangeCount > 0 {
+            language.savePendingChanges(afterSave: finish)
+        }
         else { finish() }
     }
 }

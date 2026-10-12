@@ -147,6 +147,7 @@ enum AppHelpContent {
             summary: "直接调用工程自己的导表脚本，不需要先打开 Unity；脚本输出和错误会实时显示。",
             blocks: [
                 AppHelpBlock("开始导表", text: "选择顶部项目 Tab 后，点击右上角“导表”。如果当前项目在工具内有未保存的表格或多语言修改，工具会先保存对应内容，再运行项目自己的配置脚本。普通工程使用 gen.sh；tapcoloroasis 这类同时提供 gen_plus.sh 的工程会优先使用 gen_plus.sh，保持 JSON 配置格式。"),
+                AppHelpBlock("导出框架表", text: "当前项目存在框架 Excel 表时，顶部额外显示“导出框架表”，使用 gen_framework.sh 和 luban_framework.conf；输出位置由项目脚本决定。框架导出前只保存框架数据目录中的编辑及当前框架多语言草稿，其他主表修改保留。在“框架多语言”中保存并导表也使用框架脚本。缺少有效脚本、配置或数据目录时，导出按钮禁用并提示原因。两种导出共享日志和停止功能，不能同时执行。"),
                 AppHelpBlock("日志内容", bullets: [
                     "工程目录、配置目录、数据目录、脚本路径和执行目录。",
                     "检测到的 Luban Runtime；对于 net7.0 等旧版 Luban，必要时会显示本次导表启用的 .NET 兼容模式。",
