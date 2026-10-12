@@ -393,7 +393,6 @@ struct WorkspaceRootView: View {
     @StateObject private var workspace = TableWorkspaceModel()
     @StateObject private var comparison = FolderComparisonModel()
     @AppStorage("workspaceSection") private var section = "tables"
-    private let exportButtonWidth: CGFloat = 160
     private let exportButtonHeight: CGFloat = 30
     var body: some View {
         VStack(spacing: 0) {
@@ -413,21 +412,23 @@ struct WorkspaceRootView: View {
                     Button("版本与更新说明…") { updater.showsPanel = true; Task { await updater.check() } }
                     Button("检查更新…") { Task { await updater.check() } }
                 } label: { Image(systemName: "gearshape") }.help("工具设置").disabled(exporter.isExporting || language.isBusy)
-                Button { exportCurrent() } label: {
-                    Label(exporter.isExporting ? "正在导表…" : "导表", systemImage: "play.fill")
-                }.buttonStyle(.borderedProminent).disabled(exporter.selectedProject == nil || exporter.isExporting || language.isBusy || workspace.isBusy)
-                    .controlSize(.regular).frame(width: exportButtonWidth, height: exportButtonHeight)
-                    .keyboardShortcut(.return, modifiers: .command)
-                if let project = exporter.selectedProject, ProjectConfigurationResolver.hasFrameworkTables(in: project) {
-                    Button { runExport(project, kind: .framework) } label: {
-                        Label(exporter.isExporting && exporter.activeExportKind == .framework ? "正在导出框架表…" : "导出框架表", systemImage: "square.stack.3d.up")
+                HStack(spacing: 8) {
+                    Button { exportCurrent() } label: {
+                        Label(exporter.isExporting ? "正在导表…" : "导表", systemImage: "play.fill")
+                    }.buttonStyle(.borderedProminent).disabled(exporter.selectedProject == nil || exporter.isExporting || language.isBusy || workspace.isBusy)
+                        .controlSize(.regular).frame(height: exportButtonHeight)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    if let project = exporter.selectedProject, ProjectConfigurationResolver.hasFrameworkTables(in: project) {
+                        Button { runExport(project, kind: .framework) } label: {
+                            Label(exporter.isExporting && exporter.activeExportKind == .framework ? "正在导出框架表…" : "导出框架表", systemImage: "square.stack.3d.up")
+                        }
+                        .buttonStyle(.bordered).controlSize(.regular)
+                        .frame(height: exportButtonHeight)
+                        .disabled(exporter.isExporting || language.isBusy || workspace.isBusy || ProjectConfigurationResolver.frameworkLayout(in: project) == nil)
+                        .help(ProjectConfigurationResolver.frameworkLayout(in: project) != nil
+                            ? "使用当前项目的 gen_framework.sh 导出框架 Excel 配置表"
+                            : "发现框架表，但缺少有效的 gen_framework.sh、luban_framework.conf 或框架数据目录")
                     }
-                    .buttonStyle(.bordered).controlSize(.regular)
-                    .frame(width: exportButtonWidth, height: exportButtonHeight)
-                    .disabled(exporter.isExporting || language.isBusy || workspace.isBusy || ProjectConfigurationResolver.frameworkLayout(in: project) == nil)
-                    .help(ProjectConfigurationResolver.frameworkLayout(in: project) != nil
-                        ? "使用当前项目的 gen_framework.sh 导出框架 Excel 配置表"
-                        : "发现框架表，但缺少有效的 gen_framework.sh、luban_framework.conf 或框架数据目录")
                 }
             }.frame(height: 32).padding(.horizontal, 18).padding(.vertical, 12)
             HStack(spacing: 8) {
