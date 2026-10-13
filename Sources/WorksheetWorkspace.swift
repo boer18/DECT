@@ -2553,10 +2553,10 @@ final class FrozenGridView: NSView {
             let scroll = regions[index].scroll
             let clip = scroll.contentView
             let visibleSize = clip.bounds.size
-            let documentSize = scroll.documentView?.frame.size ?? .zero
+            let documentFrame = scroll.documentView?.frame ?? .zero
             let maximum = NSPoint(
-                x: max(0, documentSize.width - visibleSize.width),
-                y: max(0, documentSize.height - visibleSize.height))
+                x: max(0, documentFrame.maxX - visibleSize.width),
+                y: max(0, documentFrame.maxY - visibleSize.height))
             let target = NSPoint(
                 x: min(max(0, origin.x), maximum.x),
                 y: min(max(0, origin.y), maximum.y))
@@ -2646,10 +2646,12 @@ final class WorksheetScrollView: NSScrollView {
         // document origin here so only this table (and its synchronized frozen
         // regions) responds.
         let clip = contentView
-        let documentSize = documentView?.frame.size ?? .zero
+        let documentFrame = documentView?.frame ?? .zero
         let visibleSize = clip.bounds.size
-        let maximum = NSPoint(x: max(0, documentSize.width - visibleSize.width),
-                              y: max(0, documentSize.height - visibleSize.height))
+        // The table document is offset below its pinned column header, so use
+        // its far edge instead of its size alone when clamping the final scroll.
+        let maximum = NSPoint(x: max(0, documentFrame.maxX - visibleSize.width),
+                              y: max(0, documentFrame.maxY - visibleSize.height))
         let origin = clip.bounds.origin
         // Trackpad deltas are already pixel-precise; preserve their native
         // feel. Mouse-wheel ticks need a stronger multiplier so a long table
