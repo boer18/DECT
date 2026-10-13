@@ -755,6 +755,14 @@ final class GridEditorModel: ObservableObject {
         extent = GridAddress(row: usedRowCount - 1, column: column)
         axisSelection = "column"; revision += 1
     }
+    func selectRowsForContextMenu(_ row: Int) -> ClosedRange<Int> {
+        if axisSelection != "row" || !rows.contains(row) { selectRows(row, extending: false) }
+        return rows
+    }
+    func selectColumnsForContextMenu(_ column: Int) -> ClosedRange<Int> {
+        if axisSelection != "column" || !columns.contains(column) { selectColumns(column, extending: false) }
+        return columns
+    }
     func configureFreeze() {
         let alert = NSAlert()
         alert.messageText = "冻结行与列"
@@ -1426,15 +1434,20 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
     private let maximumCount: Int
     private let actionVerb: String
     private let action: (Int) -> Void
+    private let fixedCount: Int?
 
     init(title: String, systemImage: String, defaultCount: Int = 1,
-         maximumCount: Int, actionVerb: String = "插入", iconColor: NSColor = .systemGreen,
+         maximumCount: Int, fixedCount: Int? = nil,
+         actionVerb: String = "插入", iconColor: NSColor = .systemGreen,
          action: @escaping (Int) -> Void) {
-        self.maximumCount = max(1, maximumCount)
+        let clampedMaximum = max(1, maximumCount)
+        let clampedFixedCount = fixedCount.map { min(max(1, $0), clampedMaximum) }
+        self.maximumCount = clampedMaximum
         self.actionVerb = actionVerb
         self.action = action
+        self.fixedCount = clampedFixedCount
         titleButton = NSButton(title: title, target: nil, action: nil)
-        countField = NSTextField(string: String(min(max(1, defaultCount), max(1, maximumCount))))
+        countField = NSTextField(string: String(min(max(1, clampedFixedCount ?? defaultCount), clampedMaximum)))
         stepper = NSStepper()
         super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 28))
 
@@ -1465,7 +1478,6 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
         countField.target = self
         countField.action = #selector(normalizeCountField(_:))
         countField.setAccessibilityLabel("\(actionVerb)数量")
-        addSubview(countField)
 
         stepper.minValue = 1
         stepper.maxValue = Double(self.maximumCount)
@@ -1477,30 +1489,38 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
         stepper.target = self
         stepper.action = #selector(stepperChanged(_:))
         stepper.setAccessibilityLabel("调整\(actionVerb)数量")
-        addSubview(stepper)
 
         imageView.translatesAutoresizingMaskIntoConstraints = false
         titleButton.translatesAutoresizingMaskIntoConstraints = false
-        countField.translatesAutoresizingMaskIntoConstraints = false
-        stepper.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
+        var constraints = [
             imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
             imageView.widthAnchor.constraint(equalToConstant: 16),
             imageView.heightAnchor.constraint(equalToConstant: 16),
-            stepper.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            stepper.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stepper.widthAnchor.constraint(equalToConstant: 22),
-            stepper.heightAnchor.constraint(equalToConstant: 19),
-            countField.trailingAnchor.constraint(equalTo: stepper.leadingAnchor, constant: -2),
-            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            countField.widthAnchor.constraint(equalToConstant: 45),
-            countField.heightAnchor.constraint(equalToConstant: 20),
             titleButton.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 7),
-            titleButton.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -6),
             titleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleButton.heightAnchor.constraint(equalToConstant: 22)
-        ])
+        ]
+        if fixedCount == nil {
+            addSubview(countField)
+            addSubview(stepper)
+            countField.translatesAutoresizingMaskIntoConstraints = false
+            stepper.translatesAutoresizingMaskIntoConstraints = false
+            constraints += [
+                stepper.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+                stepper.centerYAnchor.constraint(equalTo: centerYAnchor),
+                stepper.widthAnchor.constraint(equalToConstant: 22),
+                stepper.heightAnchor.constraint(equalToConstant: 19),
+                countField.trailingAnchor.constraint(equalTo: stepper.leadingAnchor, constant: -2),
+                countField.centerYAnchor.constraint(equalTo: centerYAnchor),
+                countField.widthAnchor.constraint(equalToConstant: 45),
+                countField.heightAnchor.constraint(equalToConstant: 20),
+                titleButton.trailingAnchor.constraint(equalTo: countField.leadingAnchor, constant: -6)
+            ]
+        } else {
+            constraints.append(titleButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9))
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -1535,7 +1555,7 @@ final class GridInsertMenuRowView: NSView, NSTextFieldDelegate {
     }
 
     @objc private func insertFromMenu(_ sender: Any?) {
-        let count = normalizedCount()
+        let count = fixedCount ?? normalizedCount()
         presentingMenu?.cancelTracking()
         action(count)
     }
@@ -1549,16 +1569,18 @@ private struct GridInsertMenuItem {
     let title: String
     let systemImage: String
     let maximumCount: Int
+    let fixedCount: Int?
     let actionVerb: String
     let iconColor: NSColor
     let action: (Int) -> Void
 
-    init(title: String, systemImage: String, maximumCount: Int,
+    init(title: String, systemImage: String, maximumCount: Int, fixedCount: Int? = nil,
          actionVerb: String = "插入", iconColor: NSColor = .systemGreen,
          action: @escaping (Int) -> Void) {
         self.title = title
         self.systemImage = systemImage
         self.maximumCount = maximumCount
+        self.fixedCount = fixedCount
         self.actionVerb = actionVerb
         self.iconColor = iconColor
         self.action = action
@@ -1574,6 +1596,7 @@ private func popUpGridInsertMenu(at point: NSPoint, in view: NSView,
         let row = GridInsertMenuRowView(title: item.title,
                                         systemImage: item.systemImage,
                                         maximumCount: item.maximumCount,
+                                        fixedCount: item.fixedCount,
                                         actionVerb: item.actionVerb,
                                         iconColor: item.iconColor,
                                         action: item.action)
@@ -1956,7 +1979,9 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         editor.onActivate?()
         endDirectTyping()
         window?.makeFirstResponder(self)
-        editor.selectRows(row, extending: false)
+        let selectedRows = editor.selectRowsForContextMenu(row)
+        let deleteStart = selectedRows.lowerBound
+        let deleteCount = selectedRows.count
         popUpGridInsertMenu(at: point, in: self, items: [
             GridInsertMenuItem(title: "在上方插入行", systemImage: "rectangle.insert.row.above",
                                maximumCount: max(1, 1_048_576 - row),
@@ -1969,10 +1994,10 @@ final class CellGridTable: NSTableView, NSTextInputClient {
                                    editor?.insert(axis: .rows, at: row + 1, count: count)
                                }),
             GridInsertMenuItem(title: "删除行", systemImage: "trash",
-                               maximumCount: max(1, editor.usedRowCount - row),
+                               maximumCount: deleteCount, fixedCount: deleteCount,
                                actionVerb: "删除", iconColor: .systemRed,
                                action: { [weak editor] count in
-                                   editor?.remove(axis: .rows, at: row, count: count)
+                                   editor?.remove(axis: .rows, at: deleteStart, count: count)
                                })
         ])
     }
@@ -2129,7 +2154,9 @@ final class GridColumnHeader: NSTableHeaderView {
         table.endDirectTyping()
         table.window?.makeFirstResponder(table)
         table.editor?.onActivate?()
-        editor.selectColumns(c, extending: false)
+        let selectedColumns = editor.selectColumnsForContextMenu(c)
+        let deleteStart = selectedColumns.lowerBound
+        let deleteCount = selectedColumns.count
         popUpGridInsertMenu(at: point, in: self, items: [
             GridInsertMenuItem(title: "在左侧插入列", systemImage: "rectangle.insert.column.left",
                                maximumCount: max(1, 256 - c),
@@ -2142,10 +2169,10 @@ final class GridColumnHeader: NSTableHeaderView {
                                    editor?.insert(axis: .columns, at: c + 1, count: count)
                                }),
             GridInsertMenuItem(title: "删除列", systemImage: "trash",
-                               maximumCount: max(1, editor.usedColumnCount - c),
+                               maximumCount: deleteCount, fixedCount: deleteCount,
                                actionVerb: "删除", iconColor: .systemRed,
                                action: { [weak editor] count in
-                                   editor?.remove(axis: .columns, at: c, count: count)
+                                   editor?.remove(axis: .columns, at: deleteStart, count: count)
                                })
         ])
     }
