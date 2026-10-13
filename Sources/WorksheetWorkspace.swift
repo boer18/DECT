@@ -1694,9 +1694,13 @@ final class CellGridTable: NSTableView, NSTextInputClient {
 
     private func installLineBreakMonitor() {
         lineBreakMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self,
+            guard let self else { return event }
+            if self.handleCellEditingUndoRedo(event) { return nil }
+            guard
+                  let window = self.window,
+                  event.windowNumber == window.windowNumber,
                   self.editedRow >= 0,
-                  let fieldEditor = self.window?.firstResponder as? NSTextView,
+                  let fieldEditor = window.firstResponder as? NSTextView,
                   fieldEditor.isFieldEditor,
                   GridCellEditingSupport.shouldInsertLineBreak(for: event, hasMarkedText: fieldEditor.hasMarkedText())
             else { return event }
@@ -1704,6 +1708,31 @@ final class CellGridTable: NSTableView, NSTextInputClient {
             self.resizeCellEditor()
             return nil
         }
+    }
+
+    private func handleCellEditingUndoRedo(_ event: NSEvent) -> Bool {
+        let blockedModifiers: NSEvent.ModifierFlags = [.control, .option]
+        guard let editor, !editor.isBusy,
+              event.modifierFlags.contains(.command),
+              event.modifierFlags.intersection(blockedModifiers).isEmpty,
+              event.charactersIgnoringModifiers?.lowercased() == "z",
+              let window,
+              event.windowNumber == window.windowNumber,
+              editedRow >= 0,
+              !((window.firstResponder as? NSTextView)?.hasMarkedText() ?? false),
+              let fieldEditor = window.firstResponder as? NSTextView,
+              fieldEditor.isFieldEditor,
+              (currentEditor() as? NSTextView) === fieldEditor else { return false }
+
+        // Commit the active cell before applying the grid's transaction-level
+        // undo. AppKit otherwise sends ⌘Z to its field editor, bypassing the
+        // worksheet history and leaving the shortcut ineffective for the grid.
+        guard window.makeFirstResponder(self) else { return false }
+        endDirectTyping()
+        if event.modifierFlags.contains(.shift) { editor.redo() }
+        else { editor.undo() }
+        window.makeFirstResponder(self)
+        return true
     }
 
     func endDirectTyping() {
