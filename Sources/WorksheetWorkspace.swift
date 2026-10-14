@@ -1316,6 +1316,27 @@ final class GridEditorModel: ObservableObject {
         }
         return didFill
     }
+    @discardableResult
+    func autoFillDownFromHandle() -> Bool {
+        guard !isBusy, snapshot != nil else { return false }
+        let sourceRows = rows, sourceColumns = columns
+        let firstTargetRow = sourceRows.upperBound + 1
+        guard firstTargetRow < usedRowCount else { return false }
+
+        let adjacentColumns = [sourceColumns.lowerBound - 1, sourceColumns.upperBound + 1]
+            .filter { $0 >= 0 && $0 < usedColumnCount }
+        var targetRow = sourceRows.upperBound
+        for column in adjacentColumns {
+            var row = firstTargetRow
+            while row < usedRowCount,
+                  !inputText(GridAddress(row: row, column: column)).isEmpty {
+                targetRow = max(targetRow, row)
+                row += 1
+            }
+        }
+        guard targetRow > sourceRows.upperBound else { return false }
+        return fillFromHandle(to: targetRow, targetColumn: sourceColumns.upperBound)
+    }
     func reapplyLastFill(_ mode: GridFillMode) {
         guard let record = lastFill, !isBusy, !history.isEmpty else { return }
         lastFill = nil; fillPreviewTarget = nil
@@ -1390,14 +1411,14 @@ final class GridEditorModel: ObservableObject {
     }
     func clearSelection() { edit(Dictionary(uniqueKeysWithValues: rows.flatMap { row in columns.map { (GridAddress(row: row, column: $0), "") } })) }
     func undo() {
-        guard let previous = history.popLast(), !isBusy else { return }
+        guard !isBusy, let previous = history.popLast() else { return }
         redoHistory.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
         changes = previous.changes; formulaAddresses = previous.formulaAddresses; insertions = previous.insertions
         lastFill = nil; fillPreviewTarget = nil; revision += 1
         refreshSearch()
     }
     func redo() {
-        guard let next = redoHistory.popLast(), !isBusy else { return }
+        guard !isBusy, let next = redoHistory.popLast() else { return }
         history.append(EditorState(changes: changes, formulaAddresses: formulaAddresses, insertions: insertions))
         changes = next.changes; formulaAddresses = next.formulaAddresses; insertions = next.insertions
         lastFill = nil; fillPreviewTarget = nil; revision += 1
@@ -1628,6 +1649,8 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     var rowOffset = 0
     var draggingRows = false
     private var filling = false
+    private var fillDragStarted = false
+    private var fillDragStart = NSPoint.zero
     private var directTypingAddress: GridAddress?
     private var markedInput = NSMutableAttributedString()
     private var markedSelection = NSRange(location: 0, length: 0)
@@ -1695,7 +1718,7 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     private func installLineBreakMonitor() {
         lineBreakMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            if self.handleCellEditingUndoRedo(event) { return nil }
+            if self.handleGridUndoRedo(event) { return nil }
             guard
                   let window = self.window,
                   event.windowNumber == window.windowNumber,
@@ -1710,24 +1733,26 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         }
     }
 
-    private func handleCellEditingUndoRedo(_ event: NSEvent) -> Bool {
+    private func handleGridUndoRedo(_ event: NSEvent) -> Bool {
         let blockedModifiers: NSEvent.ModifierFlags = [.control, .option]
         guard let editor, !editor.isBusy,
               event.modifierFlags.contains(.command),
               event.modifierFlags.intersection(blockedModifiers).isEmpty,
               event.charactersIgnoringModifiers?.lowercased() == "z",
               let window,
-              event.windowNumber == window.windowNumber,
-              editedRow >= 0,
-              !((window.firstResponder as? NSTextView)?.hasMarkedText() ?? false),
-              let fieldEditor = window.firstResponder as? NSTextView,
-              fieldEditor.isFieldEditor,
-              (currentEditor() as? NSTextView) === fieldEditor else { return false }
+              event.windowNumber == window.windowNumber else { return false }
 
-        // Commit the active cell before applying the grid's transaction-level
-        // undo. AppKit otherwise sends ⌘Z to its field editor, bypassing the
-        // worksheet history and leaving the shortcut ineffective for the grid.
-        guard window.makeFirstResponder(self) else { return false }
+        let firstResponder = window.firstResponder
+        guard !((firstResponder as? NSTextView)?.hasMarkedText() ?? false) else { return false }
+        let isGridFocused = (firstResponder as? CellGridTable) === self
+        let isCellEditorFocused = editedRow >= 0 &&
+            (firstResponder as? NSTextView).map { $0.isFieldEditor && (currentEditor() as? NSTextView) === $0 } == true
+        guard isGridFocused || isCellEditorFocused else { return false }
+
+        // Intercept before AppKit routes ⌘Z to its default undo manager, which
+        // does not know about worksheet edit transactions. Commit an active
+        // field editor first so the newest cell edit is part of that history.
+        if isCellEditorFocused, !window.makeFirstResponder(self) { return false }
         endDirectTyping()
         if event.modifierFlags.contains(.shift) { editor.redo() }
         else { editor.undo() }
@@ -1978,7 +2003,20 @@ final class CellGridTable: NSTableView, NSTextInputClient {
         let p = convert(event.locationInWindow, from: nil), localRow = row(at: p), localColumn = column(at: p)
         if let handle = fillHandleRect(), handle.insetBy(dx: -5, dy: -5).contains(p) {
             editor.onActivate?()
-            filling = true; editor.fillPreviewTarget = nil; invalidateFillPreview()
+            if event.clickCount >= 2 {
+                filling = false
+                fillDragStarted = false
+                editor.fillPreviewTarget = nil
+                _ = editor.autoFillDownFromHandle()
+                invalidateFillPreview()
+                window?.makeFirstResponder(self)
+                return
+            }
+            filling = true
+            fillDragStarted = false
+            fillDragStart = event.locationInWindow
+            editor.fillPreviewTarget = nil
+            invalidateFillPreview()
             window?.makeFirstResponder(self)
             return
         }
@@ -2032,6 +2070,10 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     }
     override func mouseDragged(with event: NSEvent) {
         if filling {
+            let dx = event.locationInWindow.x - fillDragStart.x
+            let dy = event.locationInWindow.y - fillDragStart.y
+            guard dx * dx + dy * dy >= 16 else { return }
+            fillDragStarted = true
             autoscroll(with: event)
             updateFillTarget(with: event)
             return
@@ -2044,10 +2086,14 @@ final class CellGridTable: NSTableView, NSTextInputClient {
     }
     override func mouseUp(with event: NSEvent) {
         if filling {
-            updateFillTarget(with: event)
-            let target = editor?.fillPreviewTarget
+            if fillDragStarted { updateFillTarget(with: event) }
+            let target = fillDragStarted ? editor?.fillPreviewTarget : nil
             filling = false
-            if let target { editor?.fillFromHandle(to: target.row, targetColumn: target.column) }
+            fillDragStarted = false
+            if let target {
+                editor?.fillFromHandle(to: target.row, targetColumn: target.column)
+                window?.makeFirstResponder(self)
+            }
             else { editor?.fillPreviewTarget = nil; invalidateFillPreview() }
             invalidateFillPreview()
             return
