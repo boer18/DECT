@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Dispatch
 import SwiftUI
 
 enum WorkspaceMenuAction: Equatable {
@@ -19,8 +20,13 @@ final class WorkspaceMenuRouter: ObservableObject {
 @MainActor
 final class TableWorkspaceModel: ObservableObject {
     @Published var openIDs: [String] = []
-    @Published var activeID: String?
+    @Published private(set) var activeID: String?
+    @Published private(set) var cachedPaneIDs: [String] = []
     private var previewID: String?
+    private let paneCacheLimit = 5
+    private let minimumPaneCacheBudgetBytes = 64 * 1_024 * 1_024
+    private let maximumPaneCacheBudgetBytes = 256 * 1_024 * 1_024
+    private var memoryPressureLevel = 0
     @Published var split = false
     @Published var favorites = Set(UserDefaults.standard.stringArray(forKey: "favoriteConfigTables") ?? [])
     @Published var onlyFavorites = false
@@ -31,11 +37,25 @@ final class TableWorkspaceModel: ObservableObject {
     private var metadata: [String: ProjectTable] = [:]
     private var observers: [String: AnyCancellable] = [:]
     private var monitor: AnyCancellable?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     init() {
         monitor = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self else { return }
             for id in self.openIDs { self.documents[id]?.refreshIfChanged() }
         }
+        let pressureSource = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.normal, .warning, .critical], queue: .main)
+        pressureSource.setEventHandler { [weak self, weak pressureSource] in
+            guard let pressureSource else { return }
+            let events = pressureSource.data
+            let critical = events.contains(.critical)
+            let warning = events.contains(.warning)
+            Task { @MainActor [weak self] in
+                self?.updateMemoryPressure(critical: critical, warning: warning)
+            }
+        }
+        pressureSource.resume()
+        memoryPressureSource = pressureSource
     }
     var hasPendingChanges: Bool { documents.values.contains { $0.hasPendingChanges } }
     var isBusy: Bool { documents.values.contains(where: \.isBusy) }
@@ -43,22 +63,79 @@ final class TableWorkspaceModel: ObservableObject {
     func table(_ id: String) -> ProjectTable? { metadata[id] }
     func preview(_ table: ProjectTable) {
         guard !split else { open(table); return }
-        guard !openIDs.contains(table.id) else { activeID = table.id; return }
-        if let id = previewID, documents[id]?.hasPendingChanges == false {
-            remove(id)
+        guard !openIDs.contains(table.id) else { activate(table.id); return }
+        if let id = previewID, id != table.id, documents[id]?.hasPendingChanges == false {
+            retainPane(id)
+            openIDs.removeAll { $0 == id }
         }
         open(table)
         previewID = table.id
     }
     func open(_ table: ProjectTable) {
+        let wasOpen = openIDs.contains(table.id)
         metadata[table.id] = table
         if documents[table.id] == nil {
             let editor = GridEditorModel(); documents[table.id] = editor
             observers[table.id] = editor.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
             editor.load(table.fileURL)
+        } else if !wasOpen {
+            documents[table.id]?.refreshIfChanged()
         }
         if !openIDs.contains(table.id) { openIDs.append(table.id) }
-        activeID = table.id
+        activate(table.id)
+    }
+    func activate(_ id: String) {
+        guard openIDs.contains(id), documents[id] != nil else { return }
+        activeID = id
+        retainPane(id)
+    }
+    private func retainPane(_ id: String) {
+        if cachedPaneIDs.last != id {
+            cachedPaneIDs.removeAll { $0 == id }
+            cachedPaneIDs.append(id)
+        }
+        trimCachedPanes()
+    }
+    private var paneCacheBudgetBytes: Int {
+        let memoryBased = Int(ProcessInfo.processInfo.physicalMemory / 64)
+        let normalBudget = min(maximumPaneCacheBudgetBytes, max(minimumPaneCacheBudgetBytes, memoryBased))
+        switch memoryPressureLevel {
+        case 2: return normalBudget / 4
+        case 1: return normalBudget / 2
+        default: return normalBudget
+        }
+    }
+    private var paneCacheCountLimit: Int {
+        switch memoryPressureLevel {
+        case 2: return 1
+        case 1: return 2
+        default: return paneCacheLimit
+        }
+    }
+    private var cachedPaneMemoryBytes: Int {
+        cachedPaneIDs.reduce(0) { total, id in
+            total + (documents[id]?.snapshot?.estimatedPaneCacheBytes ?? 1_048_576)
+        }
+    }
+    private func trimCachedPanes() {
+        while cachedPaneIDs.count > paneCacheCountLimit || cachedPaneMemoryBytes > paneCacheBudgetBytes {
+            guard let index = cachedPaneIDs.firstIndex(where: { $0 != activeID }) else { break }
+            let expired = cachedPaneIDs.remove(at: index)
+            discardCachedPane(expired)
+        }
+    }
+    private func updateMemoryPressure(critical: Bool, warning: Bool) {
+        memoryPressureLevel = critical ? 2 : warning ? 1 : 0
+        trimCachedPanes()
+    }
+    private func discardCachedPane(_ id: String) {
+        guard !openIDs.contains(id), activeID != id,
+              documents[id]?.hasPendingChanges != true,
+              documents[id]?.isBusy != true else { return }
+        observers[id] = nil
+        documents[id] = nil
+        metadata[id] = nil
+        if previewID == id { previewID = nil }
     }
     func openFile(_ file: URL, label: String) {
         open(ProjectTable(projectID: "", projectDisplayPath: label, fileURL: file,
@@ -83,8 +160,13 @@ final class TableWorkspaceModel: ObservableObject {
     private func remove(_ id: String) {
         let index = openIDs.firstIndex(of: id) ?? 0
         openIDs.removeAll { $0 == id }
-        if activeID == id { activeID = openIDs.isEmpty ? nil : openIDs[min(index, openIDs.count - 1)] }
+        cachedPaneIDs.removeAll { $0 == id }
+        if previewID == id { previewID = nil }
         observers[id] = nil; documents[id] = nil; metadata[id] = nil
+        if activeID == id {
+            if openIDs.isEmpty { activeID = nil }
+            else { activate(openIDs[min(index, openIDs.count - 1)]) }
+        }
     }
     func toggleFavorite(_ id: String) {
         if favorites.contains(id) { favorites.remove(id) } else { favorites.insert(id) }
@@ -140,7 +222,16 @@ struct TableWorkspaceView: View {
                                     }.frame(height: max(1, area.size.height - 14)).background(Color(nsColor: .separatorColor))
                                 }.frame(width: area.size.width, height: area.size.height).clipped()
                             } else if let id = workspace.activeID {
-                                pane(id).frame(width: area.size.width, height: area.size.height)
+                                ZStack {
+                                    ForEach(workspace.cachedPaneIDs, id: \.self) { cachedID in
+                                        pane(cachedID)
+                                            .frame(width: area.size.width, height: area.size.height)
+                                            .opacity(cachedID == id ? 1 : 0)
+                                            .allowsHitTesting(cachedID == id)
+                                            .accessibilityHidden(cachedID != id)
+                                            .zIndex(cachedID == id ? 1 : 0)
+                                    }
+                                }.frame(width: area.size.width, height: area.size.height)
                             }
                         }
                     }
@@ -223,7 +314,7 @@ struct TableWorkspaceView: View {
             HStack(spacing: 5) {
                 ForEach(workspace.openIDs, id: \.self) { id in
                     HStack(spacing: 6) {
-                        Button { workspace.activeID = id } label: {
+                        Button { workspace.activate(id) } label: {
                             Text("\(workspace.table(id)?.projectDisplayPath ?? "") · \(workspace.table(id)?.name ?? "")\(workspace.editor(id)?.hasPendingChanges == true ? " ●" : "")")
                                 .font(.caption).lineLimit(1)
                         }.buttonStyle(.plain)
@@ -240,7 +331,7 @@ struct TableWorkspaceView: View {
                 showsSelectionBorder: workspace.split && workspace.activeID == id)
                 .id(id).frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onAppear { [weak workspace] in
-                    editor.onActivate = { [weak workspace] in workspace?.activeID = id }
+                    editor.onActivate = { [weak workspace] in workspace?.activate(id) }
                 }
         }
     }

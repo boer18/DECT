@@ -41,6 +41,11 @@ struct GridSnapshot {
     let cells: [GridAddress: GridCell]
     let rowCount: Int
     let columnCount: Int
+    var estimatedCacheBytes: Int = 0
+    var estimatedPaneCacheBytes: Int {
+        if estimatedCacheBytes > 0 { return estimatedCacheBytes }
+        return max(1_048_576, cells.count * 128 + columnCount * 2_048 + min(rowCount, 1_048_576) * 16)
+    }
 }
 enum GridFillMode: Equatable {
     case copy
@@ -149,26 +154,33 @@ enum GridWorkbookIO {
         let parsedRows = try SheetRowsParser.parse(sheetData, sharedStrings: shared)
         let xml = try document(sheetData)
         let nodes = try xml.nodes(forXPath: "//*[local-name()='sheetData']/*[local-name()='row']/*[local-name()='c']")
-        var cells: [GridAddress: GridCell] = [:], maxRow = 0, maxColumn = 0
+        var cells: [GridAddress: GridCell] = [:], maxRow = 0, maxColumn = 0, cachedTextBytes = 0
         for case let cell as XMLElement in nodes {
             guard let reference = cell.attribute(forName: "r")?.stringValue, let address = GridAddress(reference) else { continue }
             // XMLParser expands text entities consistently. XMLDocument with
             // nodePreserveEntities can misreport stringValue around '#...&gt;'
             // on current macOS, even while its serialized XML is correct.
             let text = parsedRows[address.row + 1]?[address.column] ?? ""
-            let formula = !elements(cell, "f").isEmpty
+            let formulaNode = elements(cell, "f").first
+            let formula = formulaNode != nil
+            let formulaText = formulaNode?.stringValue
             if !text.isEmpty || formula {
                 let kind = cell.attribute(forName: "t")?.stringValue ?? "n"
                 cells[address] = GridCell(text: text, formula: formula,
-                    formulaText: elements(cell, "f").first?.stringValue,
+                    formulaText: formulaText,
                     valueKind: ["s", "inlineStr", "str"].contains(kind) ? "text" : kind)
+                cachedTextBytes += text.utf8.count + (formulaText?.utf8.count ?? 0)
             }
             // Ignore format-only tails which Excel can extend to row 1048576.
             if !text.isEmpty || formula { maxRow = max(maxRow, address.row); maxColumn = max(maxColumn, address.column) }
         }
         guard try fingerprint(file) == before else { throw WorkspaceError(message: "读取期间文件发生变化，请重新读取。") }
+        let rowCount = maxRow + 1, columnCount = maxColumn + 1
+        let estimatedCacheBytes = 1_048_576 + cells.count * 128 + cachedTextBytes
+            + columnCount * 2_048 + min(rowCount, 1_048_576) * 16
         return GridSnapshot(fileURL: file, fingerprint: before, sheets: sheets, sheet: sheet, cells: cells,
-                            rowCount: maxRow + 1, columnCount: maxColumn + 1)
+                            rowCount: rowCount, columnCount: columnCount,
+                            estimatedCacheBytes: estimatedCacheBytes)
     }
 
     /// Convert a source worksheet coordinate to the visible coordinate after
