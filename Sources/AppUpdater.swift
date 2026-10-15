@@ -109,6 +109,7 @@ final class AppUpdater: ObservableObject {
     @Published private(set) var releaseNotesStatus = ""
     @Published var busy = false
     @Published var status = ""
+    private(set) var shouldTerminateAfterUpdatePanelDismissal = false
     @Published var automatic = UserDefaults.standard.object(forKey: "automaticallyCheckUpdates") as? Bool ?? true {
         didSet { UserDefaults.standard.set(automatic, forKey: "automaticallyCheckUpdates") }
     }
@@ -199,6 +200,12 @@ final class AppUpdater: ObservableObject {
         showsReleaseNotes = false
         UserDefaults.standard.set(Self.currentVersion, forKey: Self.acknowledgedReleaseNotesVersionKey)
         UserDefaults.standard.removeObject(forKey: Self.pendingReleaseNotesFromKey)
+    }
+
+    func updatePanelDidDismiss() {
+        guard shouldTerminateAfterUpdatePanelDismissal else { return }
+        shouldTerminateAfterUpdatePanelDismissal = false
+        DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
     private func loadReleaseNotes() async {
@@ -371,12 +378,16 @@ final class AppUpdater: ObservableObject {
             }
             handedOff = true
             status = "更新已就绪，正在重启…"
-            // updater.busy remains true until this task exits, but it is not
-            // unsaved user work. Mark the intentional update handoff before
-            // asking AppKit to terminate so the normal quit guard cannot
-            // deadlock the installer while it waits for this process.
+            // The update panel is still presented here. Record the intentional
+            // handoff, then dismiss the sheet before requesting termination;
+            // terminating while a busy SwiftUI sheet is active can leave the
+            // old process alive and block the installer until the user quits.
             WorkspaceApplicationDelegate.isTerminatingForUpdate = true
-            NSApp.terminate(nil)
+            let updatePanelWasPresented = showsPanel
+            shouldTerminateAfterUpdatePanelDismissal = true
+            busy = false
+            showsPanel = false
+            if !updatePanelWasPresented { updatePanelDidDismiss() }
         } catch { status = "更新失败：\(error.localizedDescription)。可重试或前往发布页下载。" }
     }
 }

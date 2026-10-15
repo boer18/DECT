@@ -25,20 +25,41 @@ enum UpdaterSmokeTests {
         let source = root.appendingPathComponent("Fixture.swift")
         try """
         import AppKit
+
         final class Delegate: NSObject, NSApplicationDelegate {
+            static var isTerminatingForUpdate = false
+            private var mainWindow: NSWindow?
+            private var updateSheet: NSWindow?
             func applicationDidFinishLaunching(_ notification: Notification) {
                 let args = CommandLine.arguments
-                if let i = args.firstIndex(of: "--test-install") {
-                    let root = args[i + 1]
-                    let helper = Process()
-                    helper.executableURL = URL(fileURLWithPath: "/bin/sh")
-                    helper.arguments = [root + "/install.sh", String(ProcessInfo.processInfo.processIdentifier), root + "/测试 表格.app", root + "/new.app", root + "/previous.saved", root]
-                    do { try helper.run() } catch { fatalError(String(describing: error)) }
-                } else if let i = args.firstIndex(of: "--dect-update-complete") {
+                if let i = args.firstIndex(of: "--dect-update-complete") {
                     let text = Bundle.main.bundleURL.path + "|" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String)
                     try! text.write(toFile: args[i + 1] + "/launched", atomically: true, encoding: .utf8)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+                    return
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
+                guard let i = args.firstIndex(of: "--test-install") else { return }
+                let root = args[i + 1]
+                let helper = Process()
+                helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+                helper.arguments = [root + "/install.sh", String(ProcessInfo.processInfo.processIdentifier), root + "/测试 表格.app", root + "/new.app", root + "/previous.saved", root]
+                do { try helper.run() } catch { fatalError(String(describing: error)) }
+                Self.isTerminatingForUpdate = true
+                NSApp.setActivationPolicy(.regular)
+                let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 160),
+                    styleMask: [], backing: .buffered, defer: false)
+                mainWindow = parent
+                updateSheet = sheet
+                parent.makeKeyAndOrderFront(nil)
+                parent.beginSheet(sheet) { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { parent.endSheet(sheet) }
+            }
+            func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+            func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+                Self.isTerminatingForUpdate || CommandLine.arguments.contains("--dect-update-complete")
+                    ? .terminateNow : .terminateCancel
             }
         }
         let app = NSApplication.shared
@@ -85,7 +106,7 @@ enum UpdaterSmokeTests {
         UpdateInstaller.acknowledgeLaunch(arguments: ["test", "--dect-update-complete", root.path])
         let realReceipt = try String(contentsOf: receipt, encoding: .utf8)
         try WorkspaceSmokeTests.require(realReceipt == Bundle.main.bundleURL.path, "正式启动回执未写入")
-        print("真实更新链路通过：旧应用退出、替换、LaunchServices 启动新版、正确路径与版本回执；空格/中文路径通过。")
+        print("真实更新链路通过：活动更新 sheet 关闭后旧应用退出，助手完成替换并启动新版；路径与版本回执、空格/中文路径通过。")
         print("仅使用独立测试应用，未关闭用户工具。")
         try fm.removeItem(at: root)
     }
